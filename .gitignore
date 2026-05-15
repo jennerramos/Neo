@@ -41,6 +41,16 @@ data/
 # ── Knowledge graph (regenerable: `graphify ./api ./rag ./pipeline`) ─────────
 graphify-out/
 
+# graphify writes a machine-specific Python interpreter path here on first run.
+# Regenerated automatically; never the same across machines, so we don't track it.
+.graphify_python
+
+# ── Claude Code per-machine overrides ─────────────────────────────────────────
+# .claude/settings.json IS committed (shared project hooks/policy).
+# .claude/settings.local.json holds personal permission grants — never share.
+.claude/settings.local.json
+**/*.local.json
+
 # ── Alembic ───────────────────────────────────────────────────────────────────
 alembic/versions/__pycache__/
 
