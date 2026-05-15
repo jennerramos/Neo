@@ -117,6 +117,19 @@ PHASE1_COLLEGES = [
             },
         },
     },
+    {
+        "school": {
+            "name": "Dallas College",
+            "slug": "dallas_college",
+            "website": "https://www.dallascollege.edu",
+            "state": "TX",
+            "default_source_type": "ravnur",
+            "discovery_config": {
+                "portal_url": "https://mediaportal.dallascollege.edu",
+                "organization": "Board Meetings",
+            },
+        },
+    },
 ]
 
 
