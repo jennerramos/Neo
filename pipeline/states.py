@@ -51,6 +51,11 @@ ASR_FAILED:        Final = "asr_failed"
 PROCESSING_FAILED: Final = "processing_failed"
 FAILED:            Final = "failed"        # generic — any phase
 
+# Truly terminal — platform has no captions AND no audio download path, so
+# neither caption retry nor ASR can help. Not in RECOVERY_TARGETS by design;
+# included in TERMINAL_FAILURES so dashboards can group it with the others.
+CAPTION_UNAVAILABLE: Final = "caption_unavailable"
+
 # Legacy (kept for backwards compatibility with old rows).
 PENDING:       Final = "pending"
 
@@ -59,10 +64,11 @@ ALL_STATUSES: Final[frozenset[str]] = frozenset({
     DISCOVERED, CAPTIONED, NEEDS_ASR, DOWNLOADING, TRANSCRIBING, TRANSCRIBED,
     PROCESSED, EXTRACTED, APPROVED, INDEXED,
     REJECTED, ASR_FAILED, PROCESSING_FAILED, FAILED, PENDING,
+    CAPTION_UNAVAILABLE,
 })
 
 TERMINAL_FAILURES: Final[frozenset[str]] = frozenset({
-    ASR_FAILED, PROCESSING_FAILED, REJECTED,
+    ASR_FAILED, PROCESSING_FAILED, REJECTED, CAPTION_UNAVAILABLE,
 })
 
 

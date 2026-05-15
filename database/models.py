@@ -16,7 +16,7 @@ from sqlalchemy import (
     Boolean, Column, Date, DateTime, Float, ForeignKey,
     Integer, Numeric, String, Text, func,
 )
-from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -41,6 +41,15 @@ class School(Base):
     website: Mapped[Optional[str]] = mapped_column(Text)
     state: Mapped[Optional[str]] = mapped_column(Text, server_default="TX")
     source_type: Mapped[Optional[str]] = mapped_column(Text)
+    # Adapter dispatch key — matches CaptionSourceAdapter.source_type values
+    # registered in pipeline.sources.ADAPTERS. The legacy ``source_type`` above
+    # is kept for compatibility but no longer drives dispatch.
+    default_source_type: Mapped[str] = mapped_column(
+        Text, server_default="youtube_caption", nullable=False
+    )
+    # Free-form per-platform discovery config (URL, folder ID, ...). Schema
+    # is platform-specific; see pipeline.sources.<platform>.
+    discovery_config: Mapped[Optional[dict]] = mapped_column(JSONB)
     is_active: Mapped[bool] = mapped_column(Boolean, server_default="true", nullable=False)
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
@@ -101,9 +110,12 @@ class Meeting(Base):
     #              → processed → extracted → approved → indexed
     #
     # Terminal-failure states (no automatic recovery — see scripts/recover_failed.py):
-    #   asr_failed         — WhisperX failed in Phase 4
-    #   processing_failed  — packager failed in Phase 5
-    #   rejected           — quality_gate rejected (re-runnable via `quality_gate --recheck`)
+    #   asr_failed          — WhisperX failed in Phase 4
+    #   processing_failed   — packager failed in Phase 5
+    #   rejected            — quality_gate rejected (re-runnable via `quality_gate --recheck`)
+    #   caption_unavailable — Phase 3 confirmed the platform has no captions
+    #                         AND no audio download path, so ASR isn't an option.
+    #                         Truly terminal — no recovery exists.
     #
     # The diamond between extracted/approved is intentional: quality_gate and
     # the structured extractor are order-independent. The indexer accepts either.

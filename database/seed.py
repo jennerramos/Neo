@@ -32,7 +32,7 @@ PHASE1_COLLEGES = [
             "slug": "houston_city_college",
             "website": "https://www.hccs.edu",
             "state": "TX",
-            "source_type": "youtube",
+            "default_source_type": "youtube_caption",
         },
         "channel": {
             "youtube_channel_id": "UCwHm1fTMp6kfNN9owU62LYQ",
@@ -45,7 +45,7 @@ PHASE1_COLLEGES = [
             "slug": "lone_star_college",
             "website": "https://www.lonestar.edu",
             "state": "TX",
-            "source_type": "youtube",
+            "default_source_type": "youtube_caption",
         },
         "channel": {
             "youtube_channel_id": "UCNQ1Xm47IL2MPuf1cF6IzVQ",
@@ -58,7 +58,7 @@ PHASE1_COLLEGES = [
             "slug": "el_paso_community_college",
             "website": "https://www.epcc.edu",
             "state": "TX",
-            "source_type": "youtube",
+            "default_source_type": "youtube_caption",
         },
         "channel": {
             "youtube_channel_id": "UCeDnsaeakptM1bxNx1uyJ6A",
@@ -71,7 +71,7 @@ PHASE1_COLLEGES = [
             "slug": "central_texas_college",
             "website": "https://www.ctcd.edu",
             "state": "TX",
-            "source_type": "youtube",
+            "default_source_type": "youtube_caption",
         },
         "channel": {
             "youtube_channel_id": "UCoP5c9kvln3ADDRCvVn7etw",
@@ -84,7 +84,7 @@ PHASE1_COLLEGES = [
             "slug": "mt_san_antonio_college",
             "website": "https://www.mtsac.edu",
             "state": "CA",
-            "source_type": "youtube",
+            "default_source_type": "youtube_caption",
         },
         "channel": {
             "youtube_channel_id": "UCcDRNdBOOte8-3MHZAU_TGQ",
@@ -125,7 +125,7 @@ def main() -> None:
 
         for entry in PHASE1_COLLEGES:
             school_data = entry["school"]
-            channel_data = entry["channel"]
+            channel_data = entry.get("channel")
 
             # ── Upsert school ──────────────────────────────────────────────
             school = session.query(School).filter_by(slug=school_data["slug"]).first()
@@ -139,6 +139,9 @@ def main() -> None:
                 print(f"  [ADD]  School: {school.name} (school_id={school.school_id})")
 
             # ── Upsert channel ─────────────────────────────────────────────
+            if not channel_data:
+                continue
+
             channel = (
                 session.query(Channel)
                 .filter_by(youtube_channel_id=channel_data["youtube_channel_id"])
