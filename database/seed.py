@@ -91,6 +91,32 @@ PHASE1_COLLEGES = [
             "channel_name": "Mt. San Antonio College",
         },
     },
+    {
+        "school": {
+            "name": "Austin Community College",
+            "slug": "austin_community_college",
+            "website": "https://www.austincc.edu",
+            "state": "TX",
+            "default_source_type": "panopto",
+            "discovery_config": {
+                "board_page_url": "https://offices.austincc.edu/board-of-trustees/board-meetings/",
+                "panopto_host": "austincc.hosted.panopto.com",
+            },
+        },
+    },
+    {
+        "school": {
+            "name": "Alamo Colleges",
+            "slug": "alamo_colleges",
+            "website": "https://www.alamo.edu",
+            "state": "TX",
+            "default_source_type": "panopto",
+            "discovery_config": {
+                "board_page_url": "https://www.alamo.edu/about-us/leadership/board-of-trustees/board-meetings/videos--photos/",
+                "panopto_host": "alamo.hosted.panopto.com",
+            },
+        },
+    },
 ]
 
 
