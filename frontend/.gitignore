@@ -1,0 +1,17 @@
+# Next.js / Node — root .gitignore already covers these, but Next.js
+# contributors expect a file here too. Kept narrow on purpose.
+
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+next-env.d.ts
+.eslintcache
+
+# Local env (NEXT_PUBLIC_API_URL etc.)
+.env.local
+.env*.local
+
+# Editor / OS
+.DS_Store
+*.swp

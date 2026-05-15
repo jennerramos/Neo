@@ -1,0 +1,58 @@
+# ── Secrets ───────────────────────────────────────────────────────────────────
+# .env contains DB credentials, API keys, proxy passwords, HF token.
+# .env.example IS committed as a template.
+.env
+.env.local
+**/.env
+**/.env.local
+!.env.example
+
+# ── Python ────────────────────────────────────────────────────────────────────
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+build/
+dist/
+*.egg-info/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# ── Node / Next.js (frontend/) ────────────────────────────────────────────────
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+next-env.d.ts
+.eslintcache
+.turbo/
+
+# ── Pipeline data (regenerable from upstream; may contain auth cookies) ───────
+# data/yt_cookies.txt holds an authenticated YouTube session
+# data/audio/, raw/, processed/ are large and can be re-derived
+# data/query_log.jsonl is the per-query trace log
+data/
+
+# ── Knowledge graph (regenerable: `graphify ./api ./rag ./pipeline`) ─────────
+graphify-out/
+
+# ── Alembic ───────────────────────────────────────────────────────────────────
+alembic/versions/__pycache__/
+
+# ── Editor / OS ───────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+logs/

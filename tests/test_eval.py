@@ -1,0 +1,236 @@
+"""
+Neo v2 — Phase 14 (slim): RAG eval harness.
+
+Reads eval/eval_set.jsonl, hits the live /ask endpoint for each case, and
+checks three things per case:
+
+  1. The router classified into the expected route (sql/rag/hybrid/
+     latest_meeting/none/...). If the expected_route is "any", skipped.
+  2. The answer contains at least one keyword from must_contain_any
+     (case-insensitive).
+  3. The answer contains none of the strings in must_not_contain.
+
+Plus optional assertions:
+  - expected_school_slug — for latest_meeting route, the AskResponse
+    must resolve to that school.
+  - expected_meeting_ids — at least one of these IDs must show up in
+    citations or in the resolved meeting_id field.
+
+Usage:
+    # Run as a standalone script (clean output, easier to iterate on):
+    uv run python tests/test_eval.py
+    uv run python tests/test_eval.py --verbose
+    uv run python tests/test_eval.py --filter ask-001
+
+    # Run as pytest (CI-friendly, one test per case):
+    uv run pytest tests/test_eval.py -v
+
+The /ask backend must be running at API_URL (default http://localhost:8000).
+Set API_URL env var to point elsewhere.
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import pytest
+import requests
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+EVAL_FILE = REPO_ROOT / "eval" / "eval_set.jsonl"
+API_URL   = os.getenv("API_URL", "http://localhost:8000").rstrip("/")
+ASK_PATH  = "/ask"
+TIMEOUT_S = 60   # generous — RAG + LLM call can be slow on first hit
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Case loading
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class EvalCase:
+    id: str
+    question: str
+    route_kind: str
+    expected_route: str | None
+    must_contain_any: list[str]
+    must_not_contain: list[str]
+    school_slug: str | None
+    expected_school_slug: str | None
+    expected_meeting_ids: list[int]
+    notes: str
+
+    @classmethod
+    def from_json(cls, row: dict[str, Any]) -> "EvalCase":
+        return cls(
+            id=row["id"],
+            question=row["question"],
+            route_kind=row.get("route_kind", "unknown"),
+            expected_route=row.get("expected_route"),
+            must_contain_any=[s.lower() for s in row.get("must_contain_any", [])],
+            must_not_contain=[s.lower() for s in row.get("must_not_contain", [])],
+            school_slug=row.get("school_slug"),
+            expected_school_slug=row.get("expected_school_slug"),
+            expected_meeting_ids=row.get("expected_meeting_ids", []),
+            notes=row.get("notes", ""),
+        )
+
+
+def load_cases(path: Path = EVAL_FILE) -> list[EvalCase]:
+    cases = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        cases.append(EvalCase.from_json(json.loads(line)))
+    return cases
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Single-case runner
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class CaseResult:
+    case: EvalCase
+    ok: bool
+    failures: list[str]
+    response: dict[str, Any] | None
+    elapsed_s: float
+
+
+def run_case(case: EvalCase) -> CaseResult:
+    """Hit /ask, evaluate the response against the case's assertions."""
+    payload: dict[str, Any] = {"query": case.question}
+    if case.school_slug:
+        payload["school_slug"] = case.school_slug
+
+    failures: list[str] = []
+    response: dict[str, Any] | None = None
+    t0 = time.perf_counter()
+
+    try:
+        r = requests.post(f"{API_URL}{ASK_PATH}", json=payload, timeout=TIMEOUT_S)
+    except requests.RequestException as e:
+        return CaseResult(case, False, [f"request failed: {e}"], None, 0.0)
+    elapsed = time.perf_counter() - t0
+
+    if not r.ok:
+        return CaseResult(
+            case, False,
+            [f"HTTP {r.status_code}: {r.text[:200]}"],
+            None, elapsed,
+        )
+
+    response = r.json()
+    answer = (response.get("answer") or "").lower()
+    route = response.get("route") or ""
+
+    # 1. Route check
+    if case.expected_route and case.expected_route != "any":
+        if route != case.expected_route:
+            failures.append(
+                f"route mismatch: expected '{case.expected_route}', got '{route}'"
+            )
+
+    # 2. must_contain_any — at least one keyword present
+    if case.must_contain_any:
+        if not any(kw in answer for kw in case.must_contain_any):
+            failures.append(
+                f"answer contained none of must_contain_any={case.must_contain_any!r}"
+            )
+
+    # 3. must_not_contain — none of the strings present
+    bad = [kw for kw in case.must_not_contain if kw in answer]
+    if bad:
+        failures.append(f"answer contained banned phrases: {bad!r}")
+
+    # 4. Optional: school slug for latest_meeting
+    if case.expected_school_slug:
+        got = response.get("school_slug")
+        if got != case.expected_school_slug:
+            failures.append(
+                f"school_slug mismatch: expected '{case.expected_school_slug}', got '{got}'"
+            )
+
+    # 5. Optional: at least one expected meeting_id should show up.
+    # Match against the resolved meeting_id (latest_meeting route) OR any
+    # citation's meeting_id (rag/hybrid).
+    if case.expected_meeting_ids:
+        seen_ids: set[int] = set()
+        if response.get("meeting_id") is not None:
+            seen_ids.add(int(response["meeting_id"]))
+        for c in response.get("citations") or []:
+            mid = c.get("meeting_id")
+            if mid is not None:
+                seen_ids.add(int(mid))
+        if not (set(case.expected_meeting_ids) & seen_ids):
+            failures.append(
+                f"none of expected_meeting_ids={case.expected_meeting_ids} "
+                f"appeared in citations or resolved meeting (saw {sorted(seen_ids)})"
+            )
+
+    return CaseResult(case, not failures, failures, response, elapsed)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pytest entrypoint — one test per case so failures are isolated
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("case", load_cases(), ids=lambda c: c.id)
+def test_eval_case(case: EvalCase) -> None:
+    """Each eval case becomes its own test — pytest reports per-case pass/fail."""
+    result = run_case(case)
+    if not result.ok:
+        msg = f"\n{case.id} ({case.route_kind}): {case.question}\n"
+        msg += "\n".join(f"  - {f}" for f in result.failures)
+        if result.response:
+            msg += f"\n  route={result.response.get('route')!r}"
+            msg += f"  answer={(result.response.get('answer') or '')[:200]!r}..."
+        pytest.fail(msg)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CLI entrypoint — clean tabular output for quick iteration
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _cli(argv: list[str]) -> int:
+    verbose = "--verbose" in argv or "-v" in argv
+    filter_id = None
+    if "--filter" in argv:
+        filter_id = argv[argv.index("--filter") + 1]
+
+    cases = [c for c in load_cases() if filter_id is None or c.id == filter_id]
+    if not cases:
+        print(f"No cases match filter {filter_id!r}")
+        return 1
+
+    print(f"Neo eval — {len(cases)} cases against {API_URL}{ASK_PATH}\n")
+    results: list[CaseResult] = []
+    for case in cases:
+        result = run_case(case)
+        results.append(result)
+        flag = "PASS" if result.ok else "FAIL"
+        print(f"  [{flag}] {case.id:<10} {case.route_kind:<14} {case.question[:60]}")
+        if not result.ok or verbose:
+            for f in result.failures:
+                print(f"           ! {f}")
+            if verbose and result.response:
+                print(f"           route={result.response.get('route')!r}")
+                ans = (result.response.get("answer") or "")[:160].replace("\n", " ")
+                print(f"           answer={ans!r}")
+                print(f"           elapsed={result.elapsed_s:.1f}s")
+
+    passed = sum(1 for r in results if r.ok)
+    failed = len(results) - passed
+    print(f"\n{passed} passed, {failed} failed")
+    return 0 if failed == 0 else 1
+
+
+if __name__ == "__main__":
+    sys.exit(_cli(sys.argv[1:]))
