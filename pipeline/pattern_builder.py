@@ -30,7 +30,7 @@ from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sqlalchemy import create_engine, delete, func, text
+from sqlalchemy import Date, cast, create_engine, delete, func, text
 from sqlalchemy.orm import sessionmaker
 
 import config
@@ -92,15 +92,15 @@ def _build_recurring_initiative_signals(session, min_schools: int) -> list[dict]
             func.count(func.distinct(Initiative.meeting_id)).label("meeting_count"),
             func.count(Initiative.measured_outcome).label("measured_count"),
             func.avg(Initiative.confidence).label("avg_confidence"),
-            func.min(func.cast(
+            func.min(cast(
                 func.date(func.coalesce(
                     # Approximate from meeting published_date via join — use
                     # created_at as a safe fallback
                     Initiative.created_at
-                )), type_=None
+                )), Date
             )).label("first_date"),
-            func.max(func.cast(
-                func.date(Initiative.created_at), type_=None
+            func.max(cast(
+                func.date(Initiative.created_at), Date
             )).label("last_date"),
             func.array_agg(Initiative.initiative_id).label("initiative_ids"),
         )
