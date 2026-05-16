@@ -45,10 +45,11 @@ graphify-out/
 # Regenerated automatically; never the same across machines, so we don't track it.
 .graphify_python
 
-# ── Claude Code per-machine overrides ─────────────────────────────────────────
-# .claude/settings.json IS committed (shared project hooks/policy).
-# .claude/settings.local.json holds personal permission grants — never share.
-.claude/settings.local.json
+# ── Claude Code (AI assistant config — kept local to each contributor) ────────
+# .claude/settings.json:        shared hooks/policy (re-add if you onboard collaborators)
+# .claude/settings.local.json:  personal permission grants
+# Easier to keep the whole directory local for a solo project.
+.claude/
 **/*.local.json
 
 # ── Alembic ───────────────────────────────────────────────────────────────────
