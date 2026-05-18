@@ -13,6 +13,13 @@ export default async function MeetingDetailPage({ params }: { params: { id: stri
     notFound();
   }
   const { meeting: m, votes, financials, personnel, key_chunks } = data;
+  const videoHref = m.video_url ?? (m.video_id ? `https://www.youtube.com/watch?v=${m.video_id}` : null);
+  const videoLabel =
+    m.source_type === "panopto"
+      ? "Watch on Panopto ↗"
+      : m.source_type === "ravnur"
+        ? "Watch on MediaPortal ↗"
+        : "Watch on YouTube ↗";
 
   return (
     <div className="mx-auto max-w-4xl space-y-8">
@@ -40,14 +47,14 @@ export default async function MeetingDetailPage({ params }: { params: { id: stri
           >
             Read full transcript →
           </Link>
-          {m.video_id && (
+          {videoHref && (
             <a
-              href={`https://www.youtube.com/watch?v=${m.video_id}`}
+              href={videoHref}
               target="_blank"
               rel="noopener noreferrer"
               className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:border-red-300 hover:text-red-600"
             >
-              Watch on YouTube ↗
+              {videoLabel}
             </a>
           )}
         </div>

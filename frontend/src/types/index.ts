@@ -20,6 +20,7 @@ export interface Pagination {
 export interface Meeting {
   meeting_id: number;
   video_id: string;
+  video_url: string | null;
   school_slug: string;
   school_name: string | null;
   title: string | null;

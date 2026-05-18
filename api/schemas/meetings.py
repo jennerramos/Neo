@@ -18,6 +18,7 @@ class MeetingRow(BaseModel):
     # touching the schema. See refactor_candidates.md #4.
     meeting_id:      int
     video_id:        str
+    video_url:       Optional[str] = None
     school_slug:     str
     school_name:     Optional[str] = None
     title:           Optional[str] = None

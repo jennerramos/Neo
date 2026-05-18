@@ -23,6 +23,36 @@ function youtubeUrl(videoId: string, startSec?: number | null): string {
   return startSec ? `${base}&t=${Math.floor(startSec)}s` : base;
 }
 
+function videoLabel(sourceType: string | null): string {
+  if (sourceType === "panopto") return "Watch on Panopto ↗";
+  if (sourceType === "ravnur") return "Watch on MediaPortal ↗";
+  return "Watch on YouTube ↗";
+}
+
+function seekUrl(
+  videoUrl: string | null,
+  videoId: string,
+  sourceType: string | null,
+  startSec: number | null | undefined,
+): string | null {
+  if (startSec == null) return null;
+  const sec = Math.floor(startSec);
+  if (sourceType === "panopto" && videoUrl) {
+    const sep = videoUrl.includes("?") ? "&" : "?";
+    return `${videoUrl}${sep}start=${sec}`;
+  }
+  if (sourceType === "youtube_caption" || !sourceType) {
+    return `https://www.youtube.com/watch?v=${videoId}&t=${sec}s`;
+  }
+  return null;
+}
+
+function seekTooltip(sourceType: string | null): string {
+  if (sourceType === "panopto") return "Jump to this moment on Panopto";
+  if (sourceType === "ravnur") return "MediaPortal doesn't support timestamp links";
+  return "Jump to this moment on YouTube";
+}
+
 export default function TranscriptPage() {
   const params = useParams<{ id: string }>();
   const meetingId = Number(params.id);
@@ -68,6 +98,7 @@ export default function TranscriptPage() {
   }
 
   const { meeting: m, segments } = data;
+  const videoHref = m.video_url ?? (m.video_id ? youtubeUrl(m.video_id) : null);
 
   return (
     <div className="mx-auto max-w-4xl space-y-6">
@@ -101,14 +132,14 @@ export default function TranscriptPage() {
           >
             ← Back to overview
           </Link>
-          {m.video_id && (
+          {videoHref && (
             <a
-              href={youtubeUrl(m.video_id)}
+              href={videoHref}
               target="_blank"
               rel="noopener noreferrer"
               className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:border-red-300 hover:text-red-600"
             >
-              Watch on YouTube ↗
+              {videoLabel(m.source_type)}
             </a>
           )}
         </div>
@@ -139,21 +170,30 @@ export default function TranscriptPage() {
                       {s.speaker}
                     </span>
                   )}
-                  {m.video_id && s.start_time != null ? (
-                    <a
-                      href={youtubeUrl(m.video_id, s.start_time)}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      title="Jump to this moment on YouTube"
-                      className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-slate-500 hover:bg-red-100 hover:text-red-700"
-                    >
-                      {fmtTs(s.start_time)}
-                    </a>
-                  ) : (
-                    <span className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-slate-500">
-                      {fmtTs(s.start_time)}
-                    </span>
-                  )}
+                  {(() => {
+                    const href = seekUrl(m.video_url, m.video_id, m.source_type, s.start_time);
+                    if (href) {
+                      return (
+                        <a
+                          href={href}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          title={seekTooltip(m.source_type)}
+                          className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-slate-500 hover:bg-red-100 hover:text-red-700"
+                        >
+                          {fmtTs(s.start_time)}
+                        </a>
+                      );
+                    }
+                    return (
+                      <span
+                        title={seekTooltip(m.source_type)}
+                        className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-slate-500"
+                      >
+                        {fmtTs(s.start_time)}
+                      </span>
+                    );
+                  })()}
                   <a
                     href={`#${anchorId}`}
                     className="ml-auto text-slate-300 hover:text-indigo-500"
