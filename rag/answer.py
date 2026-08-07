@@ -57,7 +57,7 @@ def ask(
     model:        Optional[str] = None,
     force_route:  Optional[str] = None,   # override router: "sql"|"rag"|"hybrid"
     verbose:      bool = False,
-) -> Union[dict, Generator[str, None, None]]:
+) -> dict:
     """
     Full Neo v2 RAG pipeline: route → context → generate.
 
@@ -69,7 +69,8 @@ def ask(
         speaker:      Filter RAG results to a specific speaker.
         meeting_type: Filter RAG results by source_type ('vtt' | 'asr').
         top_k:        RAG chunks after reranking (default config.RERANK_TOP_K = 8).
-        stream:       If True, return a token generator for real-time display.
+        stream:       If True, the returned dict carries a ``stream`` key
+                      instead of ``answer`` (see Returns below).
         model:        Ollama model override (default config.OLLAMA_MODEL).
         force_route:  Skip the router and use this route ('sql'|'rag'|'hybrid').
         verbose:      Print routing/retrieval details to stdout.
@@ -87,7 +88,11 @@ def ask(
         }
 
     Returns (stream=True):
-        Generator[str] — yields text tokens; metadata not included.
+        Same shape as above, except ``answer`` is replaced by
+        ``stream`` — a generator yielding text tokens. Metadata
+        (route, citations, decision, elapsed_sec-at-start) is delivered
+        up-front so callers can emit it before the first token arrives.
+        Consumers must fully drain the generator to obtain the answer.
     """
     t0 = time.perf_counter()
 
@@ -116,20 +121,18 @@ def ask(
 
     # ── Off-topic: return immediately without touching DB or Qdrant ──────────
     if route == "none":
+        # P2-1 (per implementation plan): message now covers all tracked
+        # institutions, not just HCC.
         _msg = (
-            "I'm Neo, an assistant for HCC board meeting intelligence. "
+            "I'm Neo, an assistant for community-college board meetings "
+            "across our tracked institutions. "
             "I can answer questions about board votes, budget decisions, personnel actions, "
-            "contracts, initiatives, and discussions from official HCC board meeting transcripts. "
+            "contracts, initiatives, and discussions from official board meeting transcripts. "
             "I'm not able to help with questions outside that scope. "
             "Try asking something like: \"What did the board vote on in the last meeting?\" "
             "or \"Who was recently appointed to an executive role?\""
         )
-        if stream:
-            def _msg_gen():
-                yield _msg
-            return _msg_gen()
-        return {
-            "answer":      _msg,
+        base = {
             "citations":   [],
             "route":       "none",
             "model":       model or config.OLLAMA_MODEL,
@@ -138,6 +141,11 @@ def ask(
             "sql_records": None,
             "elapsed_sec": round(time.perf_counter() - t0, 2),
         }
+        if stream:
+            def _msg_gen():
+                yield _msg
+            return {**base, "stream": _msg_gen()}
+        return {**base, "answer": _msg}
 
     # ── Latest-meeting: pin retrieval to one specific meeting ────────────────
     if route == "latest_meeting":
@@ -159,12 +167,7 @@ def ask(
                 f"I couldn't find any completed meetings for {who} yet. "
                 "Once transcripts are processed this question will pick them up automatically."
             )
-            if stream:
-                def _m():
-                    yield _msg
-                return _m()
-            return {
-                "answer":      _msg,
+            base = {
                 "citations":   [],
                 "route":       "latest_meeting",
                 "model":       model or config.OLLAMA_MODEL,
@@ -173,6 +176,11 @@ def ask(
                 "sql_records": None,
                 "elapsed_sec": round(time.perf_counter() - t0, 2),
             }
+            if stream:
+                def _m():
+                    yield _msg
+                return {**base, "stream": _m()}
+            return {**base, "answer": _msg}
 
         meeting_date = str(meeting["published_date"])[:10]
 
@@ -195,13 +203,31 @@ def ask(
             query=query,
         )
 
+        lm_extra = {
+            "route":         "latest_meeting",
+            "decision":      decision,
+            "rag_chunks":    lm_chunks,
+            "sql_records":   lm_sql_records,
+            "meeting_id":    meeting["meeting_id"],
+            "meeting_title": meeting.get("title"),
+            "meeting_date":  meeting_date,
+            "school_slug":   meeting["school_slug"],
+            "school_name":   meeting.get("school_name"),
+        }
         if stream:
-            return generate(
+            gen_result = generate(
                 query=query, route="hybrid",
                 sql_context=lm_sql_text,
                 rag_chunks=lm_chunks,
                 stream=True, model=model,
             )
+            return {
+                **lm_extra,
+                "citations":   gen_result["citations"],
+                "model":       gen_result["model"],
+                "stream":      gen_result["stream"],
+                "elapsed_sec": round(time.perf_counter() - t0, 2),
+            }
 
         result = generate(
             query=query, route="hybrid",
@@ -211,19 +237,11 @@ def ask(
         )
         elapsed = round(time.perf_counter() - t0, 2)
         return {
-            "answer":        result["answer"],
-            "citations":     result["citations"],
-            "route":         "latest_meeting",
-            "model":         result["model"],
-            "decision":      decision,
-            "rag_chunks":    lm_chunks,
-            "sql_records":   lm_sql_records,
-            "elapsed_sec":   elapsed,
-            "meeting_id":    meeting["meeting_id"],
-            "meeting_title": meeting.get("title"),
-            "meeting_date":  meeting_date,
-            "school_slug":   meeting["school_slug"],
-            "school_name":   meeting.get("school_name"),
+            **lm_extra,
+            "answer":      result["answer"],
+            "citations":   result["citations"],
+            "model":       result["model"],
+            "elapsed_sec": elapsed,
         }
 
     # ── Compare: run across multiple schools, then generate ─────────────────
@@ -270,13 +288,26 @@ def ask(
         if verbose:
             print(f"    RAG chunks (cross-school): {len(compare_chunks)}")
 
+        compare_extra = {
+            "route":       "compare",
+            "decision":    decision,
+            "rag_chunks":  compare_chunks,
+            "sql_records": compare_sql_records,
+        }
         if stream:
-            return generate(
+            gen_result = generate(
                 query=query, route="hybrid",
                 sql_context=compare_sql_text,
                 rag_chunks=compare_chunks,
                 stream=True, model=model,
             )
+            return {
+                **compare_extra,
+                "citations":   gen_result["citations"],
+                "model":       gen_result["model"],
+                "stream":      gen_result["stream"],
+                "elapsed_sec": round(time.perf_counter() - t0, 2),
+            }
 
         result = generate(
             query=query, route="hybrid",
@@ -286,13 +317,10 @@ def ask(
         )
         elapsed = round(time.perf_counter() - t0, 2)
         return {
+            **compare_extra,
             "answer":      result["answer"],
             "citations":   result["citations"],
-            "route":       "compare",
             "model":       result["model"],
-            "decision":    decision,
-            "rag_chunks":  compare_chunks,
-            "sql_records": compare_sql_records,
             "elapsed_sec": elapsed,
         }
 
@@ -343,8 +371,15 @@ def ask(
             print(f"    RAG chunks retrieved: {len(rag_chunks)}")
 
     # ── Step 4: Generate ─────────────────────────────────────────────────────
+    common_extra = {
+        "route":       route,
+        "decision":    decision,
+        "rag_chunks":  rag_chunks,
+        "sql_records": sql_records,
+    }
+
     if stream:
-        return generate(
+        gen_result = generate(
             query=query,
             route=route,
             sql_context=sql_text,
@@ -352,6 +387,13 @@ def ask(
             stream=True,
             model=model,
         )
+        return {
+            **common_extra,
+            "citations":   gen_result["citations"],
+            "model":       gen_result["model"],
+            "stream":      gen_result["stream"],
+            "elapsed_sec": round(time.perf_counter() - t0, 2),
+        }
 
     result = generate(
         query=query,
@@ -365,13 +407,10 @@ def ask(
     elapsed = round(time.perf_counter() - t0, 2)
 
     return {
+        **common_extra,
         "answer":      result["answer"],
         "citations":   result["citations"],
-        "route":       route,
         "model":       result["model"],
-        "decision":    decision,
-        "rag_chunks":  rag_chunks,
-        "sql_records": sql_records,
         "elapsed_sec": elapsed,
     }
 
@@ -404,7 +443,7 @@ def main() -> None:
 
     if args.stream:
         print("── Answer (streaming) ──────────────────────────────────")
-        gen = ask(
+        stream_result = ask(
             args.query,
             school_slug=args.school,
             date_from=args.date_from,
@@ -415,7 +454,8 @@ def main() -> None:
             force_route=args.route,
             verbose=args.verbose,
         )
-        for token in gen:
+        # Stream shape (new): dict with metadata + a "stream" generator.
+        for token in stream_result["stream"]:
             print(token, end="", flush=True)
         print("\n")
         return

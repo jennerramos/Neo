@@ -1,7 +1,7 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { askNeo } from "@/lib/api";
+import { askNeoStream } from "@/lib/api";
 import type { AskResponse, Citation } from "@/types";
 import { cn, fmtDate } from "@/lib/utils";
 import Spinner from "@/components/ui/Spinner";
@@ -169,6 +169,10 @@ export default function AskBox({ hero = false, suggested = DEFAULT_SUGGESTED, sc
   /** Filled from sessionStorage when the user comes back from a citation page. */
   const [restoredAt, setRestoredAt] = useState<string | null>(null);
 
+  // Held so an in-flight stream can be cancelled if the user clicks a
+  // suggestion again or hits reset. Not state — we don't need re-renders.
+  const streamCtrlRef = useRef<AbortController | null>(null);
+
   const schoolOptions = schools ?? [
     { slug: "houston_city_college", name: "Houston City College" },
     { slug: "lone_star_college",    name: "Lone Star College" },
@@ -187,32 +191,88 @@ export default function AskBox({ hero = false, suggested = DEFAULT_SUGGESTED, sc
     }
   }, []);
 
-  async function submit(q?: string) {
+  // Cancel any in-flight stream on unmount.
+  useEffect(() => () => streamCtrlRef.current?.abort(), []);
+
+  function submit(q?: string) {
     const text = (q ?? query).trim();
     if (!text) return;
+
+    // Cancel any prior in-flight stream — otherwise its onToken callbacks
+    // would continue to mutate state after we've moved on.
+    streamCtrlRef.current?.abort();
+
     setQuery(text);
     setLoading(true);
     setError(null);
-    setResult(null);
     setRestoredAt(null);
-    try {
-      const res = await askNeo({ query: text, school_slug: school || undefined, top_k: 8 });
-      setResult(res);
-      // Persist so back-navigation from a citation page restores everything.
-      saveAskState({
-        query:   text,
-        school,
-        result:  res,
-        savedAt: new Date().toISOString(),
-      });
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
-    }
+    // Seed a partial result so the answer panel appears immediately;
+    // meta arrives next, tokens append after that.
+    setResult({
+      answer:      "",
+      route:       "",
+      citations:   [],
+      model:       "",
+      elapsed_sec: 0,
+    });
+
+    let accumulated = "";
+    let meta: Partial<AskResponse> = {};
+
+    streamCtrlRef.current = askNeoStream(
+      { query: text, school_slug: school || undefined, top_k: 8 },
+      {
+        onMeta: (m) => {
+          meta = m;
+          setResult((prev) => ({
+            answer:        accumulated,
+            route:         m.route ?? "",
+            citations:     m.citations ?? [],
+            model:         m.model ?? "",
+            elapsed_sec:   prev?.elapsed_sec ?? 0,
+            meeting_id:    m.meeting_id,
+            meeting_title: m.meeting_title,
+            meeting_date:  m.meeting_date,
+            school_slug:   m.school_slug,
+            school_name:   m.school_name,
+          }));
+        },
+        onToken: (tok) => {
+          accumulated += tok;
+          setResult((prev) => (prev ? { ...prev, answer: accumulated } : prev));
+        },
+        onDone: (elapsedSec) => {
+          setLoading(false);
+          const finalRes: AskResponse = {
+            answer:        accumulated,
+            route:         (meta.route as string) ?? "",
+            citations:     (meta.citations as Citation[]) ?? [],
+            model:         (meta.model as string) ?? "",
+            elapsed_sec:   elapsedSec,
+            meeting_id:    meta.meeting_id,
+            meeting_title: meta.meeting_title,
+            meeting_date:  meta.meeting_date,
+            school_slug:   meta.school_slug,
+            school_name:   meta.school_name,
+          };
+          setResult(finalRes);
+          saveAskState({
+            query:   text,
+            school,
+            result:  finalRes,
+            savedAt: new Date().toISOString(),
+          });
+        },
+        onError: (msg) => {
+          setLoading(false);
+          setError(msg);
+        },
+      },
+    );
   }
 
   function resetForAnother() {
+    streamCtrlRef.current?.abort();
     setResult(null);
     setQuery("");
     setRestoredAt(null);
@@ -292,8 +352,8 @@ export default function AskBox({ hero = false, suggested = DEFAULT_SUGGESTED, sc
         </div>
       )}
 
-      {/* Loading */}
-      {loading && (
+      {/* Initial spinner — only while streaming hasn't produced anything yet */}
+      {loading && (!result || !result.answer) && (
         <div className="flex flex-col items-center gap-3 py-12 text-slate-400">
           <Spinner size={32} />
           <p className="text-sm">Neo is thinking…</p>
@@ -305,21 +365,30 @@ export default function AskBox({ hero = false, suggested = DEFAULT_SUGGESTED, sc
         <div className="rounded-lg bg-red-50 p-4 text-sm text-red-700">{error}</div>
       )}
 
-      {/* Result */}
-      {result && !loading && (
+      {/* Result — visible as soon as any answer text has streamed in */}
+      {result && (result.answer || !loading) && (
         <div className="space-y-5">
           {/* Meta row */}
           <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
-            <span className={cn(
-              "rounded-full px-2.5 py-0.5 font-semibold uppercase tracking-wide",
-              ROUTE_COLORS[result.route] ?? "bg-slate-100 text-slate-600"
-            )}>
-              {ROUTE_LABELS[result.route] ?? result.route}
-            </span>
-            <span>·</span>
-            <span>{result.model}</span>
-            <span>·</span>
-            <span>{result.elapsed_sec}s</span>
+            {result.route && (
+              <span className={cn(
+                "rounded-full px-2.5 py-0.5 font-semibold uppercase tracking-wide",
+                ROUTE_COLORS[result.route] ?? "bg-slate-100 text-slate-600"
+              )}>
+                {ROUTE_LABELS[result.route] ?? result.route}
+              </span>
+            )}
+            {result.model && <><span>·</span><span>{result.model}</span></>}
+            {result.elapsed_sec > 0 && <><span>·</span><span>{result.elapsed_sec}s</span></>}
+            {loading && (
+              <>
+                <span>·</span>
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-indigo-50 px-2 py-0.5 font-medium text-indigo-700">
+                  <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-indigo-500" />
+                  streaming
+                </span>
+              </>
+            )}
             {/* When restoredAt is set we got here by hitting back from a citation
              *  page, not by hitting Submit — surface that gently so users don't
              *  wonder if they clicked the wrong button. */}

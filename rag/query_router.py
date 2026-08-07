@@ -28,11 +28,39 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path
-from typing import TypedDict
+from typing import Optional, TypedDict
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import config
+
+# Router classifier is a 5-token call — should never take more than a couple
+# of seconds. Cap it aggressively so a hung Ollama can't wedge every /ask.
+# Failure defaults to route="hybrid" (see _llm_route below), which is a
+# safe fallback that just runs both SQL and RAG paths.
+import httpx
+from ollama import Client as _OllamaClient
+
+_ROUTER_CONNECT_TIMEOUT = 2.0
+_ROUTER_READ_TIMEOUT    = 5.0
+
+_router_client: Optional[_OllamaClient] = None
+
+
+def _get_router_client() -> _OllamaClient:
+    """Module-singleton Ollama client for the router classifier only."""
+    global _router_client
+    if _router_client is None:
+        _router_client = _OllamaClient(
+            host=config.OLLAMA_HOST,
+            timeout=httpx.Timeout(
+                connect=_ROUTER_CONNECT_TIMEOUT,
+                read=_ROUTER_READ_TIMEOUT,
+                write=_ROUTER_READ_TIMEOUT,
+                pool=_ROUTER_READ_TIMEOUT,
+            ),
+        )
+    return _router_client
 
 
 # ---------------------------------------------------------------------------
@@ -407,15 +435,15 @@ Respond with exactly one word: SQL, RAG, HYBRID, or NONE."""
 def _llm_route(query: str) -> RouteDecision:
     """Use Ollama to classify ambiguous queries. Returns a RouteDecision."""
     try:
-        import ollama
-        resp = ollama.chat(
+        client = _get_router_client()
+        resp = client.chat(
             model=config.OLLAMA_MODEL,
             messages=[{"role": "user", "content": _CLASSIFY_PROMPT.format(query=query)}],
             options={"temperature": 0, "num_predict": 5},
         )
         label = resp["message"]["content"].strip().upper()
     except Exception:
-        label = "HYBRID"   # safe default on failure
+        label = "HYBRID"   # safe default on timeout / connection failure
 
     route_map = {"SQL": "sql", "RAG": "rag", "HYBRID": "hybrid", "NONE": "none"}
     route = route_map.get(label, "hybrid")

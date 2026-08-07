@@ -1,7 +1,9 @@
 """Neo v2 FastAPI application."""
 from __future__ import annotations
+import logging
 import sys
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 # Ensure project root is importable
@@ -13,18 +15,56 @@ from fastapi.responses import JSONResponse
 
 from api.routers import schools, meetings, votes, financials, insights, ask, export
 
+log = logging.getLogger("neo.startup")
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """Warm the retriever's lazy model singletons at boot.
+
+    Without this, the first ``/ask`` request in a fresh process pays a
+    ~5–15 s hit for loading fastembed dense + sparse + BGE reranker.
+    That first request is exactly the one most likely to time out on the
+    client (browser fetch, proxy idle-timeout). Loading here trades a
+    one-time boot cost for a consistent p95.
+
+    Each getter is lazy-guarded, so calling them from tests or from the
+    pipeline still works — this is just a first-touch.
+    """
+    log.info("startup: warming RAG retriever models …")
+    t0 = time.perf_counter()
+    try:
+        from rag.retriever import _get_dense_model, _get_sparse_model, _get_reranker
+        _get_dense_model()
+        _get_sparse_model()
+        _get_reranker()
+        log.info(
+            "startup: RAG models ready in %.1fs", time.perf_counter() - t0,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Never block the app from starting because a model failed to load —
+        # /ask will surface a clearer error at request time, and /health
+        # stays green so a supervisor can restart cleanly.
+        log.warning(
+            "startup: RAG warm-up failed (%s). "
+            "First /ask will pay cold-start cost.", exc,
+        )
+    yield
+    # Nothing to tear down; model handles are GC'd with the process.
+
 
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Neo v2 — Board Meeting Intelligence",
         description=(
-            "API for HCC trustee board meeting intelligence. "
+            "API for community-college board meeting intelligence. "
             "Provides structured data on meetings, votes, financials, "
             "personnel actions, and cross-college insights."
         ),
         version="2.0.0",
         docs_url="/docs",
         redoc_url="/redoc",
+        lifespan=_lifespan,
     )
 
     # ── CORS ──────────────────────────────────────────────────────────────────

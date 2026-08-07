@@ -189,6 +189,110 @@ export interface AskRequest {
 export const askNeo = (req: AskRequest): Promise<AskResponse> =>
   post("/ask", req);
 
+// ── Ask (streaming) ──────────────────────────────────────────────────────────
+//
+// SSE consumer for POST /ask?stream=true. The backend emits four frame types:
+//
+//   {"type":"meta",  route, model, citations, meeting_id?, ...}
+//   {"type":"token", text}          (many)
+//   {"type":"done",  elapsed_sec}
+//   {"type":"error", message}       (on failure — may follow meta or replace it)
+//
+// The caller supplies onMeta / onToken / onDone / onError callbacks and can
+// abort mid-stream via the returned AbortController.
+export type AskStreamMeta = Pick<
+  AskResponse,
+  "route" | "model" | "citations" | "meeting_id" | "meeting_title" | "meeting_date" | "school_slug" | "school_name"
+>;
+
+export interface AskStreamHandlers {
+  onMeta:  (meta: AskStreamMeta) => void;
+  onToken: (text: string) => void;
+  onDone:  (elapsedSec: number) => void;
+  onError: (message: string) => void;
+}
+
+export function askNeoStream(req: AskRequest, handlers: AskStreamHandlers): AbortController {
+  const ctrl = new AbortController();
+
+  (async () => {
+    try {
+      const res = await fetch(`${BASE}/ask?stream=true`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Accept":       "text/event-stream",
+        },
+        body:   JSON.stringify(req),
+        signal: ctrl.signal,
+      });
+
+      if (!res.ok || !res.body) {
+        const text = await res.text().catch(() => "");
+        handlers.onError(`API ${res.status}: ${text || "no body"}`);
+        return;
+      }
+
+      // SSE frames are separated by "\n\n". Buffer partial reads across chunks
+      // — a single ReadableStream chunk can end mid-frame.
+      const reader  = res.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      let buffer = "";
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        let sep = buffer.indexOf("\n\n");
+        while (sep !== -1) {
+          const rawFrame = buffer.slice(0, sep);
+          buffer = buffer.slice(sep + 2);
+          sep = buffer.indexOf("\n\n");
+
+          // Each frame is one or more "data: <json>" lines. We only emit
+          // one JSON object per frame, so take the first data line.
+          const dataLine = rawFrame
+            .split("\n")
+            .find((ln) => ln.startsWith("data:"));
+          if (!dataLine) continue;
+
+          const payload = dataLine.slice(5).trim();   // strip "data:"
+          if (!payload) continue;
+
+          let evt: { type: string; [k: string]: unknown };
+          try {
+            evt = JSON.parse(payload);
+          } catch {
+            continue;   // malformed frame — skip, don't kill the stream
+          }
+
+          switch (evt.type) {
+            case "meta":
+              handlers.onMeta(evt as unknown as AskStreamMeta);
+              break;
+            case "token":
+              handlers.onToken(String(evt.text ?? ""));
+              break;
+            case "done":
+              handlers.onDone(Number(evt.elapsed_sec ?? 0));
+              break;
+            case "error":
+              handlers.onError(String(evt.message ?? "unknown error"));
+              break;
+          }
+        }
+      }
+    } catch (e: unknown) {
+      // AbortError is expected when the caller cancels — don't surface as error.
+      if (e instanceof DOMException && e.name === "AbortError") return;
+      handlers.onError(e instanceof Error ? e.message : String(e));
+    }
+  })();
+
+  return ctrl;
+}
+
 // ── Export helpers ────────────────────────────────────────────────────────────
 
 export const exportVotesCsvUrl = (school?: string, dateFrom?: string, dateTo?: string) => {

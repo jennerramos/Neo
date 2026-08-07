@@ -25,11 +25,40 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Generator, Optional, Union
+from typing import Any, Generator, Optional, Union
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import config
+
+# Explicit HTTP timeouts on the Ollama call. Generation for board-meeting
+# answers can legitimately take ~60s on qwen2.5:14b, but a hung Ollama should
+# never wedge a FastAPI worker forever. httpx.Timeout gives us separate
+# connect and read budgets; the read budget matches OLLAMA_TIMEOUT used by
+# the pipeline extractor so both call sites cap the same way.
+import httpx
+from ollama import Client as _OllamaClient
+
+_OLLAMA_CONNECT_TIMEOUT = 5.0
+_OLLAMA_READ_TIMEOUT    = 120.0
+
+_client: Optional[_OllamaClient] = None
+
+
+def _get_client() -> _OllamaClient:
+    """Module-singleton Ollama client with explicit timeouts."""
+    global _client
+    if _client is None:
+        _client = _OllamaClient(
+            host=config.OLLAMA_HOST,
+            timeout=httpx.Timeout(
+                connect=_OLLAMA_CONNECT_TIMEOUT,
+                read=_OLLAMA_READ_TIMEOUT,
+                write=_OLLAMA_READ_TIMEOUT,
+                pool=_OLLAMA_READ_TIMEOUT,
+            ),
+        )
+    return _client
 
 # ---------------------------------------------------------------------------
 # System prompt
@@ -216,12 +245,12 @@ def _call_ollama(
     model:  str,
     stream: bool,
 ) -> Union[str, Generator[str, None, None]]:
-    """Call Ollama and return text or a token generator."""
-    try:
-        import ollama
-    except ImportError:
-        print("❌  ollama package not installed.  Fix: uv sync --extra extraction")
-        sys.exit(1)
+    """Call Ollama and return text or a token generator.
+
+    Uses the shared ``_get_client()`` so every generator call inherits the
+    explicit connect/read timeouts declared at module import.
+    """
+    client = _get_client()
 
     # Few-shot: a fake prior turn that demonstrates the [N] citation format.
     # See the comment on _ONESHOT_USER above for why this is in the messages
@@ -235,7 +264,7 @@ def _call_ollama(
 
     if stream:
         def _gen():
-            for chunk in ollama.chat(
+            for chunk in client.chat(
                 model=model,
                 messages=messages,
                 stream=True,
@@ -246,7 +275,7 @@ def _call_ollama(
                     yield token
         return _gen()
 
-    resp = ollama.chat(
+    resp = client.chat(
         model=model,
         messages=messages,
         stream=False,
@@ -266,7 +295,7 @@ def generate(
     rag_chunks:  Optional[list[dict]] = None,
     stream:      bool = False,
     model:       Optional[str] = None,
-) -> Union[dict, Generator[str, None, None]]:
+) -> dict[str, Any]:
     """
     Generate a grounded answer from available context.
 
@@ -275,8 +304,10 @@ def generate(
         route:       "sql" | "rag" | "hybrid" — controls context assembly.
         sql_context: Formatted SQL context string (from sql_context.build_sql_context).
         rag_chunks:  Reranked chunks (from retriever.retrieve).
-        stream:      If True, return a token generator instead of a dict.
-        model:       Ollama model name (default: config.OLLAMA_MODEL = "qwen2.5:14b").
+        stream:      If True, ``stream`` field carries a token generator
+                     and ``answer`` is absent — callers must consume the
+                     generator to obtain the full text.
+        model:       Ollama model name (default: config.OLLAMA_MODEL).
 
     Returns (stream=False):
         {
@@ -287,7 +318,17 @@ def generate(
         }
 
     Returns (stream=True):
-        Generator[str] — yields text tokens as they arrive.
+        {
+          "stream":    Generator[str, None, None],   # yields text tokens
+          "citations": list[dict],
+          "route":     str,
+          "model":     str,
+        }
+
+    The stream=True shape carries citations and metadata up-front so the
+    caller (e.g. api.services.ask_service) can emit an SSE ``meta`` frame
+    before the first token — the frontend needs the citation list to render
+    the source-cards panel next to the streaming answer.
     """
     if model is None:
         model = config.OLLAMA_MODEL
@@ -297,7 +338,12 @@ def generate(
     )
 
     if stream:
-        return _call_ollama(prompt, model, stream=True)
+        return {
+            "stream":    _call_ollama(prompt, model, stream=True),
+            "citations": citations,
+            "route":     route,
+            "model":     model,
+        }
 
     answer = _call_ollama(prompt, model, stream=False)
 
