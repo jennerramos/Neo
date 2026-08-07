@@ -13,6 +13,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+import config
 from api.routers import schools, meetings, votes, financials, insights, ask, export
 
 log = logging.getLogger("neo.startup")
@@ -68,16 +69,21 @@ def create_app() -> FastAPI:
     )
 
     # ── CORS ──────────────────────────────────────────────────────────────────
+    # Origins come from NEO_CORS_ORIGINS (see config.py); unset falls back to
+    # the localhost dev hosts.
+    log.info(
+        "startup: CORS origins=%s credentials=%s",
+        config.CORS_ORIGINS, config.CORS_ALLOW_CREDENTIALS,
+    )
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[
-            "http://localhost:3000",   # Next.js dev
-            "http://localhost:3001",
-            "http://127.0.0.1:3000",
-        ],
-        allow_credentials=True,
+        allow_origins=config.CORS_ORIGINS,
+        allow_credentials=config.CORS_ALLOW_CREDENTIALS,
         allow_methods=["*"],
         allow_headers=["*"],
+        # X-Process-Time is set by the timing middleware below; without this the
+        # browser can't read it on a cross-origin response.
+        expose_headers=["X-Process-Time"],
     )
 
     # ── Request timing middleware ─────────────────────────────────────────────

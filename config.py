@@ -134,6 +134,34 @@ MIN_CHUNK_QUALITY_SCORE: float = float(os.getenv("MIN_CHUNK_QUALITY_SCORE", "0.6
 API_HOST: str = os.getenv("API_HOST", "0.0.0.0")
 API_PORT: int = int(os.getenv("API_PORT", "8000"))
 
+# Browser origins allowed to call the API directly (CORS `Access-Control-Allow-Origin`).
+# Comma-separated; falls back to the local dev hosts when unset so `uv run` on a
+# workstation keeps working with no .env entry.
+#
+# Deployment note: behind the Caddy/Next.js reverse proxy the browser only ever
+# hits a same-origin `/api/*` URL, so CORS is not exercised at all. This matters
+# for anyone pointing a browser at the API on another hostname (a second
+# frontend deploy, a preview build, local frontend against the VPS API).
+#
+#   NEO_CORS_ORIGINS=https://neo.example.com,https://staging.neo.example.com
+#
+_DEV_CORS_ORIGINS = [
+    "http://localhost:3000",   # Next.js dev
+    "http://localhost:3001",
+    "http://127.0.0.1:3000",
+]
+CORS_ORIGINS: list = [
+    o.strip().rstrip("/")
+    for o in os.getenv("NEO_CORS_ORIGINS", "").split(",")
+    if o.strip()
+] or _DEV_CORS_ORIGINS
+
+# Credentialed requests (cookies / Authorization) cannot be combined with a
+# wildcard origin — the browser rejects `Access-Control-Allow-Origin: *` when
+# credentials are sent. Downgrade automatically instead of shipping a config
+# that silently fails every preflight.
+CORS_ALLOW_CREDENTIALS: bool = "*" not in CORS_ORIGINS
+
 # ---------------------------------------------------------------------------
 # UI — Streamlit
 # ---------------------------------------------------------------------------
