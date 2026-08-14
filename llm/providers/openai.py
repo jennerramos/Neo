@@ -11,6 +11,7 @@ installed SDK, not to this module.
 """
 from __future__ import annotations
 
+import logging
 from typing import Iterator, Optional
 
 from llm.base import LLMResult
@@ -35,6 +36,9 @@ except ImportError as exc:  # pragma: no cover - install-time failure
 # openai>=3 is built on httpx2 while the rest of the tree is on httpx 0.28, so
 # a hand-rolled httpx.Timeout would be the wrong type. `openai.Timeout` always
 # matches whatever the installed SDK is using.
+
+
+log = logging.getLogger(__name__)
 
 
 class OpenAIProvider:
@@ -114,6 +118,22 @@ class OpenAIProvider:
             ) from exc
         raise LLMError(f"{self.provider} call failed: {type(exc).__name__}: {msg}") from exc
 
+    def _warn_truncated(self, visible_tokens: Optional[int], max_tokens: int) -> None:
+        """A cut-off answer is worse than an error: it looks finished.
+
+        The trustee sees a sentence that stops mid-word and has no way to tell
+        it from the model's real conclusion. On a reasoning model the usual
+        cause is not a long answer — it is thinking tokens spending the budget
+        before the first visible token, so `visible` here is often tiny
+        relative to max_tokens.
+        """
+        log.warning(
+            "%s/%s answer TRUNCATED at the token limit (max_tokens=%d, "
+            "visible completion tokens=%s). Raise LLM_MAX_TOKENS or lower "
+            "LLM_REASONING_EFFORT.",
+            self.provider, self.model, max_tokens, visible_tokens,
+        )
+
     def _empty_answer_error(self) -> LLMError:
         """Truncation before any visible text — a real, actionable failure.
 
@@ -158,6 +178,12 @@ class OpenAIProvider:
             raise self._empty_answer_error()
 
         usage = resp.usage
+        if finish == "length":
+            self._warn_truncated(
+                getattr(usage, "completion_tokens", None) if usage else None,
+                max_tokens,
+            )
+
         return LLMResult(
             text=text,
             model=self.model,
@@ -197,9 +223,14 @@ class OpenAIProvider:
         except Exception as exc:  # noqa: BLE001
             self._raise(exc)
 
-        # Surface silent truncation instead of handing the trustee a blank answer.
+        # Surface silent truncation instead of handing the trustee a blank
+        # answer. Mid-stream we cannot raise once tokens are already on the
+        # wire without corrupting the SSE frame sequence, so a cut-off stream
+        # is logged rather than raised.
         if not emitted and finish == "length":
             raise self._empty_answer_error()
+        if emitted and finish == "length":
+            self._warn_truncated(None, max_tokens)
 
 
 __all__ = ["OpenAIProvider"]

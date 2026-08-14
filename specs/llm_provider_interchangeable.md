@@ -987,6 +987,48 @@ output varies run to run even at `temperature=0.1`. Treat a single eval run as
 a noisy sample: a 1-case delta is not a regression, and 8/9 should be read as
 "8–9 of 9". Ollama's 8/9 was stable — the same case failed every time.
 
+### Thinking tokens were eating the answer (fixed) — 8/9 to **9/9**
+
+Reported as "answers are too short". `Tell about HCC` came back 374 chars,
+cut off mid-sentence at "HCC partnered". Measured on the real RAG prompt:
+
+| `LLM_REASONING_EFFORT` | `LLM_MAX_TOKENS` | finish | visible tokens | chars |
+|---|---|---|---|---|
+| (default) | 2048 | **length** | **82** | 423 |
+| none | 2048 | stop | 508 | 2529 |
+| low | 4096 | stop | 410 | 1994 |
+| (default) | 8192 | stop | 442 | 2072 |
+| **none** | **8192** | stop | **568** | **2786** |
+
+**Only 82 of 2048 tokens reached the answer** — thinking spent ~96% of the
+budget before the first visible token. This is §6's `max_tokens` warning
+biting in its partial form: not a blank answer (which `_empty_answer_error`
+already catches) but a *plausible-looking* one that stops mid-word.
+
+Settled on `LLM_REASONING_EFFORT=none` + `LLM_MAX_TOKENS=8192`. Turning
+thinking off wins on every axis at once: longest answers, lowest token spend,
+lowest latency. Neo's generation step is grounded synthesis over
+already-retrieved context — the reasoning was being spent re-deriving what
+retrieval had already established. Same finding as the router, where
+`effort=low|medium` measurably *misrouted* queries that `none` got right.
+
+**This took the eval from 8/9 to 9/9 — the first clean sweep on this set,
+better than the qwen2.5:14b baseline has ever scored.** The failures were
+never model quality; truncated answers simply could not contain the strings
+`must_contain_any` was looking for. Any eval run before this fix understated
+Gemini's real quality.
+
+`max_tokens` is a ceiling, not a target — raising it does not pad short
+answers. Measured after the change: off-topic refusal 438 chars / 1.0 s,
+simple SQL lookup 355 chars / 1.2 s, broad "tell me everything" 3611 chars /
+11.2 s. `Tell about HCC` went 374 → 1288 chars with 8 citations, and got
+*faster* (8.5 s → 3.7 s) because the budget stopped going to thinking.
+
+`llm/providers/openai.py` now logs a TRUNCATED warning whenever
+`finish_reason == "length"` with visible text. A cut-off answer is worse than
+an error — it looks finished, and the trustee has no way to tell it from the
+model's real conclusion.
+
 ### Silent router degradation (fixed)
 
 `_llm_route`'s `except Exception -> "HYBRID"` had no log line. On localhost
