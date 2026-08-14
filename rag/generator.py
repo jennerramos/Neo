@@ -1,8 +1,12 @@
 """
-Neo v2 — Phase 10: Answer Generator (Ollama / qwen2.5:14b)
+Neo v2 — Phase 10: Answer Generator
 
 Takes structured context (SQL records and/or RAG chunks) and generates
-a grounded, cited answer using a local Ollama model.
+a grounded, cited answer.
+
+The model behind this is whatever ``LLM_PROVIDER`` / ``LLM_MODEL`` name in
+.env — Ollama/qwen2.5:14b locally, or Gemini/OpenAI/Anthropic/DeepSeek via an
+API key. This module never imports a vendor SDK; see ``llm/``.
 
 Supports all three routing paths:
   sql     — context is SQL-formatted records only
@@ -30,35 +34,12 @@ from typing import Any, Generator, Optional, Union
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import config
+from llm import get_provider
 
-# Explicit HTTP timeouts on the Ollama call. Generation for board-meeting
-# answers can legitimately take ~60s on qwen2.5:14b, but a hung Ollama should
-# never wedge a FastAPI worker forever. httpx.Timeout gives us separate
-# connect and read budgets; the read budget matches OLLAMA_TIMEOUT used by
-# the pipeline extractor so both call sites cap the same way.
-import httpx
-from ollama import Client as _OllamaClient
-
-_OLLAMA_CONNECT_TIMEOUT = 5.0
-_OLLAMA_READ_TIMEOUT    = 120.0
-
-_client: Optional[_OllamaClient] = None
-
-
-def _get_client() -> _OllamaClient:
-    """Module-singleton Ollama client with explicit timeouts."""
-    global _client
-    if _client is None:
-        _client = _OllamaClient(
-            host=config.OLLAMA_HOST,
-            timeout=httpx.Timeout(
-                connect=_OLLAMA_CONNECT_TIMEOUT,
-                read=_OLLAMA_READ_TIMEOUT,
-                write=_OLLAMA_READ_TIMEOUT,
-                pool=_OLLAMA_READ_TIMEOUT,
-            ),
-        )
-    return _client
+# Timeouts, retries and the connect/read split now live in the "generate"
+# profile in llm/factory.py (5s connect / 120s read, matching what this module
+# used to declare inline). A board-meeting answer legitimately takes ~60s on
+# qwen2.5:14b, but a hung LLM must never wedge a FastAPI worker forever.
 
 # ---------------------------------------------------------------------------
 # System prompt
@@ -237,51 +218,43 @@ _ONESHOT_ASSISTANT = (
 
 
 # ---------------------------------------------------------------------------
-# Ollama client (lazy)
+# LLM call (provider-neutral)
 # ---------------------------------------------------------------------------
 
-def _call_ollama(
+def _call_llm(
     prompt: str,
-    model:  str,
+    model:  Optional[str],
     stream: bool,
 ) -> Union[str, Generator[str, None, None]]:
-    """Call Ollama and return text or a token generator.
+    """Send the built prompt to the configured provider.
 
-    Uses the shared ``_get_client()`` so every generator call inherits the
-    explicit connect/read timeouts declared at module import.
+    ``system`` is passed separately from ``messages`` rather than as a
+    ``{"role": "system"}`` entry: Ollama, Gemini, OpenAI and DeepSeek accept
+    system-as-a-message, but Anthropic requires a top-level ``system=`` and
+    errors on the message form. The provider re-attaches it the way its own
+    API expects — see llm/base.py.
     """
-    client = _get_client()
+    provider = get_provider("generate", model)
 
     # Few-shot: a fake prior turn that demonstrates the [N] citation format.
     # See the comment on _ONESHOT_USER above for why this is in the messages
     # array rather than the system prompt.
     messages = [
-        {"role": "system",    "content": _SYSTEM_PROMPT},
         {"role": "user",      "content": _ONESHOT_USER},
         {"role": "assistant", "content": _ONESHOT_ASSISTANT},
         {"role": "user",      "content": prompt},
     ]
+    kwargs = dict(
+        system=_SYSTEM_PROMPT,
+        messages=messages,
+        temperature=config.LLM_TEMPERATURE,
+        max_tokens=config.LLM_MAX_TOKENS,
+    )
 
     if stream:
-        def _gen():
-            for chunk in client.chat(
-                model=model,
-                messages=messages,
-                stream=True,
-                options={"temperature": 0.1, "num_predict": 1024},
-            ):
-                token = chunk.get("message", {}).get("content", "")
-                if token:
-                    yield token
-        return _gen()
+        return provider.stream(**kwargs)
 
-    resp = client.chat(
-        model=model,
-        messages=messages,
-        stream=False,
-        options={"temperature": 0.1, "num_predict": 1024},
-    )
-    return resp["message"]["content"]
+    return provider.complete(**kwargs).text
 
 
 # ---------------------------------------------------------------------------
@@ -307,7 +280,9 @@ def generate(
         stream:      If True, ``stream`` field carries a token generator
                      and ``answer`` is absent — callers must consume the
                      generator to obtain the full text.
-        model:       Ollama model name (default: config.OLLAMA_MODEL).
+        model:       Override the configured model for this call
+                     (default: config.LLM_MODEL). The provider — and so the
+                     endpoint and API key — always comes from LLM_PROVIDER.
 
     Returns (stream=False):
         {
@@ -331,7 +306,7 @@ def generate(
     the source-cards panel next to the streaming answer.
     """
     if model is None:
-        model = config.OLLAMA_MODEL
+        model = config.LLM_MODEL
 
     prompt, citations = _build_prompt_and_citations(
         query, sql_context, rag_chunks, route,
@@ -339,13 +314,13 @@ def generate(
 
     if stream:
         return {
-            "stream":    _call_ollama(prompt, model, stream=True),
+            "stream":    _call_llm(prompt, model, stream=True),
             "citations": citations,
             "route":     route,
             "model":     model,
         }
 
-    answer = _call_ollama(prompt, model, stream=False)
+    answer = _call_llm(prompt, model, stream=False)
 
     return {
         "answer":    answer,

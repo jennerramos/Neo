@@ -53,17 +53,25 @@ extraction = [
     "ollama>=0.2",
 ]
 
+# Serving-path LLM providers. Install the ones LLM_PROVIDER may be set to;
+# llm/factory.py imports them lazily, so running on Ollama never needs the
+# cloud SDKs. `ollama` is here as well as in `extraction` because rag/ needs
+# it too whenever LLM_PROVIDER=ollama.
+#   ollama                     -> ollama
+#   gemini | openai | deepseek -> openai   (all three speak the OpenAI wire format)
+#   anthropic                  -> anthropic
+llm = [
+    "ollama>=0.2",
+    "openai>=1.40",
+    "anthropic>=0.28",
+]
+
 # Phase 8-9: Qdrant vector DB + embeddings + reranking
 vector = [
     "qdrant-client>=1.9",
     "fastembed>=0.2",   # BM25 sparse vectors
     # BGE reranker loaded via sentence-transformers:
     "sentence-transformers>=2.7",
-]
-
-# Phase 10: Claude API (RAG answer generation)
-llm = [
-    "anthropic>=0.28",
 ]
 
 # Phase 11: FastAPI extras (already in core, this adds data layer)
@@ -124,6 +132,7 @@ explicit = true
 packages = [
     "api",
     "rag",
+    "llm",
     "pipeline",
     "database",
 ]
