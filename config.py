@@ -74,18 +74,61 @@ COMPUTE_TYPE: str   = os.getenv("COMPUTE_TYPE", "float16")  # 'float16' | 'int8'
 HUGGINGFACE_TOKEN: str = os.getenv("HUGGINGFACE_TOKEN", "")
 
 # ---------------------------------------------------------------------------
-# LLM — Ollama (local, for extraction)
+# LLM — Ollama (local; offline extraction pipeline)
 # ---------------------------------------------------------------------------
-
+#
+# These stay Ollama-specific on purpose. pipeline/extractor.py and
+# pipeline/initiative_extractor.py talk to Ollama directly with format="json",
+# which has no portable equivalent across cloud providers. Offline batch runs
+# on the local GPU are free, so they stay here.
+#
 OLLAMA_HOST: str  = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "qwen2.5:14b")
 
 # ---------------------------------------------------------------------------
-# LLM — Claude API (customer-facing RAG)
+# LLM — provider-neutral (serving path: /ask generation + query routing)
 # ---------------------------------------------------------------------------
+#
+# Switching providers is env + restart, no code change:
+#
+#   LLM_PROVIDER=ollama                        # local, default
+#   LLM_PROVIDER=gemini    LLM_MODEL=gemini-2.5-flash   LLM_API_KEY=...
+#   LLM_PROVIDER=openai    LLM_MODEL=gpt-4o-mini        LLM_API_KEY=...
+#   LLM_PROVIDER=anthropic LLM_MODEL=claude-sonnet-5    LLM_API_KEY=...
+#   LLM_PROVIDER=deepseek  LLM_MODEL=deepseek-chat      LLM_API_KEY=...
+#
+# Every default below falls back to today's Ollama behavior, so an existing
+# .env with no LLM_* lines keeps working byte-identically.
+#
+LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "ollama").strip().lower()
+LLM_MODEL:    str = os.getenv("LLM_MODEL", OLLAMA_MODEL)
+LLM_BASE_URL: str = os.getenv("LLM_BASE_URL", "")   # "" = provider's own default
+LLM_API_KEY:  str = os.getenv("LLM_API_KEY", "")    # never a literal default
 
-ANTHROPIC_API_KEY: str   = os.getenv("ANTHROPIC_API_KEY", "")
-CLAUDE_MODEL: str        = os.getenv("CLAUDE_MODEL", "claude-opus-4-6")
+LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.1"))
+LLM_MAX_TOKENS:  int   = int(os.getenv("LLM_MAX_TOKENS", "1024"))
+
+# Gemini/OpenAI reasoning models spend thinking tokens out of the SAME
+# max_tokens budget as the visible answer, so a cap tuned for qwen2.5:14b can
+# be consumed before the first answer token. "" = don't send the parameter.
+#   gemini: none | low | medium | high
+LLM_REASONING_EFFORT: str = os.getenv("LLM_REASONING_EFFORT", "").strip().lower()
+
+# The query-router classifier is a one-word call on a 5s budget. Letting a
+# reasoning model think there burns the budget (and the money) for no gain, so
+# it defaults to "none" independently of the generation setting above.
+LLM_ROUTER_REASONING_EFFORT: str = os.getenv(
+    "LLM_ROUTER_REASONING_EFFORT", "none"
+).strip().lower()
+LLM_ROUTER_MAX_TOKENS: int = int(os.getenv("LLM_ROUTER_MAX_TOKENS", "16"))
+
+# Two timeout profiles. Generation on qwen2.5:14b can legitimately take ~60s;
+# the router classifier is a 5-token call that must fail fast so a hung LLM
+# can't wedge every /ask.
+LLM_CONNECT_TIMEOUT: float = float(os.getenv("LLM_CONNECT_TIMEOUT", "5"))
+LLM_READ_TIMEOUT:    float = float(os.getenv("LLM_READ_TIMEOUT", "120"))
+LLM_ROUTER_CONNECT_TIMEOUT: float = float(os.getenv("LLM_ROUTER_CONNECT_TIMEOUT", "2"))
+LLM_ROUTER_READ_TIMEOUT:    float = float(os.getenv("LLM_ROUTER_READ_TIMEOUT", "5"))
 
 # ---------------------------------------------------------------------------
 # Embeddings — nomic-embed-text

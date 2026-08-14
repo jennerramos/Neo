@@ -45,7 +45,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 EVAL_FILE = REPO_ROOT / "eval" / "eval_set.jsonl"
 API_URL   = os.getenv("API_URL", "http://localhost:8000").rstrip("/")
 ASK_PATH  = "/ask"
-TIMEOUT_S = 60   # generous — RAG + LLM call can be slow on first hit
+# Generous — RAG + LLM call can be slow on first hit. Raise it when profiling a
+# cloud reasoning model, so a slow provider reports a score instead of a wall of
+# read-timeouts.
+TIMEOUT_S = int(os.getenv("EVAL_TIMEOUT_S", "60"))
 
 
 # ─────────────────────────────────────────────────────────────────────────────

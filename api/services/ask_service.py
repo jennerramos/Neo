@@ -29,10 +29,20 @@ from typing import AsyncIterator
 # Ensure project root is on path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
+from fastapi import HTTPException
 from starlette.concurrency import run_in_threadpool
 
+import config
 from rag.answer import ask as _ask
 from api.schemas.ask import AskRequest, AskResponse, Citation
+from llm.errors import (
+    LLMAuthError,
+    LLMConfigError,
+    LLMError,
+    LLMRateLimited,
+    LLMTimeout,
+    LLMUnavailable,
+)
 from observability.query_log import log_query
 
 log = logging.getLogger("neo.ask")
@@ -77,23 +87,65 @@ def _sse(payload: dict) -> bytes:
 
 
 # ---------------------------------------------------------------------------
+# LLM failure -> HTTP
+# ---------------------------------------------------------------------------
+#
+# Running on a local Ollama, the only realistic LLM failure was "it's down",
+# and a bare 500 was survivable. A metered provider adds 429 (quota/rate limit)
+# and 401 (bad key) as routine outcomes, and the raw stack trace leaks the
+# provider's error JSON to the browser. Map them once, here.
+
+# LLM error class -> (HTTP status, message the trustee sees)
+_LLM_HTTP: tuple[tuple[type, int, str], ...] = (
+    (LLMRateLimited, 429, "Neo is over its AI provider quota right now. Please retry shortly."),
+    (LLMTimeout,     504, "The AI provider took too long to answer. Please try again."),
+    (LLMAuthError,   503, "Neo's AI provider credentials were rejected. An administrator has been notified."),
+    (LLMConfigError, 503, "Neo's AI provider is misconfigured. An administrator has been notified."),
+    (LLMUnavailable, 503, "Neo's AI provider is unavailable right now. Please try again shortly."),
+    (LLMError,       503, "Neo could not generate an answer right now. Please try again."),
+)
+
+
+def _llm_http(exc: Exception) -> tuple[int, str] | None:
+    """(status, safe message) for an LLM failure, or None if not one."""
+    for cls, status, message in _LLM_HTTP:
+        if isinstance(exc, cls):
+            return status, message
+    return None
+
+
+def _client_error_message(exc: Exception) -> str:
+    """Message safe to hand a browser — never the provider's raw error body."""
+    mapped = _llm_http(exc)
+    return mapped[1] if mapped else f"{type(exc).__name__}: {exc}"
+
+
+# ---------------------------------------------------------------------------
 # Non-streaming path
 # ---------------------------------------------------------------------------
 
 async def handle_ask(req: AskRequest) -> AskResponse:
     t0 = time.perf_counter()
 
-    # rag.answer.ask does sync SQL + Qdrant + rerank + Ollama work; offload
+    # rag.answer.ask does sync SQL + Qdrant + rerank + LLM work; offload
     # so the event loop keeps serving other requests.
-    result = await run_in_threadpool(
-        _ask,
-        query=req.query,
-        school_slug=req.school_slug,
-        date_from=req.date_from,
-        date_to=req.date_to,
-        top_k=req.top_k,
-        force_route=req.force_route,
-    )
+    try:
+        result = await run_in_threadpool(
+            _ask,
+            query=req.query,
+            school_slug=req.school_slug,
+            date_from=req.date_from,
+            date_to=req.date_to,
+            top_k=req.top_k,
+            force_route=req.force_route,
+        )
+    except LLMError as exc:
+        status, message = _llm_http(exc)  # type: ignore[misc]  # always matches
+        # Full provider detail (quota metric, retry delay) goes to the log, not
+        # to the browser.
+        log.warning("ask failed: %s: %s", type(exc).__name__, exc)
+        raise HTTPException(status_code=status, detail=message) from exc
+
     elapsed = round(time.perf_counter() - t0, 2)
 
     response = _build_response(result, elapsed)
@@ -140,7 +192,7 @@ async def handle_ask_stream(req: AskRequest) -> AsyncIterator[bytes]:
         )
     except Exception as exc:  # noqa: BLE001
         log.exception("ask pipeline failed before streaming")
-        yield _sse({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
+        yield _sse({"type": "error", "message": _client_error_message(exc)})
         return
 
     # ── Phase 2: emit meta frame so the UI can render citations immediately ──
@@ -175,7 +227,7 @@ async def handle_ask_stream(req: AskRequest) -> AsyncIterator[bytes]:
                 yield _sse({"type": "token", "text": token})
         except Exception as exc:  # noqa: BLE001
             log.exception("ask streaming failed mid-generation")
-            yield _sse({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
+            yield _sse({"type": "error", "message": _client_error_message(exc)})
             # fall through to done frame + logging so the client always sees end
 
     # ── Phase 4: final frame + trace log ────────────────────────────────────
@@ -187,7 +239,7 @@ async def handle_ask_stream(req: AskRequest) -> AsyncIterator[bytes]:
             answer="".join(answer_parts),
             route=result.get("route", "unknown"),
             citations=[Citation(**c) for c in citations_dicts],
-            model=result.get("model", "qwen2.5:14b"),
+            model=result.get("model", config.LLM_MODEL),
             elapsed_sec=elapsed,
             meeting_id=result.get("meeting_id"),
             meeting_title=result.get("meeting_title"),

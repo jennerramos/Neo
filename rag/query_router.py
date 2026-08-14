@@ -25,6 +25,7 @@ RouteDecision fields:
 """
 from __future__ import annotations
 
+import logging
 import re
 import sys
 from pathlib import Path
@@ -33,34 +34,15 @@ from typing import Optional, TypedDict
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import config
+from llm import get_provider
 
-# Router classifier is a 5-token call — should never take more than a couple
-# of seconds. Cap it aggressively so a hung Ollama can't wedge every /ask.
-# Failure defaults to route="hybrid" (see _llm_route below), which is a
-# safe fallback that just runs both SQL and RAG paths.
-import httpx
-from ollama import Client as _OllamaClient
+log = logging.getLogger(__name__)
 
-_ROUTER_CONNECT_TIMEOUT = 2.0
-_ROUTER_READ_TIMEOUT    = 5.0
-
-_router_client: Optional[_OllamaClient] = None
-
-
-def _get_router_client() -> _OllamaClient:
-    """Module-singleton Ollama client for the router classifier only."""
-    global _router_client
-    if _router_client is None:
-        _router_client = _OllamaClient(
-            host=config.OLLAMA_HOST,
-            timeout=httpx.Timeout(
-                connect=_ROUTER_CONNECT_TIMEOUT,
-                read=_ROUTER_READ_TIMEOUT,
-                write=_ROUTER_READ_TIMEOUT,
-                pool=_ROUTER_READ_TIMEOUT,
-            ),
-        )
-    return _router_client
+# The router classifier is a 5-token call — it should never take more than a
+# couple of seconds. It uses the "route" profile (2s connect / 5s read, no
+# retries) rather than the generous "generate" profile, so a hung or throttled
+# LLM can't wedge every /ask. Failure defaults to route="hybrid" (see
+# _llm_route below), a safe fallback that just runs both SQL and RAG paths.
 
 
 # ---------------------------------------------------------------------------
@@ -432,18 +414,48 @@ Question: {query}
 Respond with exactly one word: SQL, RAG, HYBRID, or NONE."""
 
 
+# The classifier answers with one word. The old Ollama call relied on a hard
+# 5-token cap to truncate anything longer; that cap is unsafe on a cloud
+# reasoning model, where thinking tokens are spent from the same budget and a
+# tight cap yields an EMPTY reply (which would silently route everything to
+# hybrid). So: give it a little headroom and parse the label out of whatever
+# comes back.
+_ROUTER_MAX_TOKENS = config.LLM_ROUTER_MAX_TOKENS
+_LABEL_RE = re.compile(r"\b(SQL|RAG|HYBRID|NONE)\b")
+
+
+def _parse_label(text: str) -> str:
+    """Pull the route label out of the classifier reply. '' -> hybrid fallback."""
+    m = _LABEL_RE.search((text or "").upper())
+    return m.group(1) if m else "HYBRID"
+
+
 def _llm_route(query: str) -> RouteDecision:
-    """Use Ollama to classify ambiguous queries. Returns a RouteDecision."""
+    """Use the configured LLM to classify ambiguous queries.
+
+    The classifier prompt carries its own instructions, so there is no system
+    prompt here — hence ``system=""``.
+    """
     try:
-        client = _get_router_client()
-        resp = client.chat(
-            model=config.OLLAMA_MODEL,
+        result = get_provider("route").complete(
+            system="",
             messages=[{"role": "user", "content": _CLASSIFY_PROMPT.format(query=query)}],
-            options={"temperature": 0, "num_predict": 5},
+            temperature=0,
+            max_tokens=_ROUTER_MAX_TOKENS,
         )
-        label = resp["message"]["content"].strip().upper()
-    except Exception:
-        label = "HYBRID"   # safe default on timeout / connection failure
+        label = _parse_label(result.text)
+    except Exception as exc:  # noqa: BLE001
+        # Safe default on timeout / connection / config failure. This fallback
+        # is deliberately silent to the caller, but it must NOT be silent to
+        # us: on a local Ollama it fired ~never, while a cloud provider can
+        # trip the 5s router budget and degrade routing quality with no other
+        # symptom. Without this line the only evidence is a route that looks
+        # like a model opinion but was actually a network failure.
+        log.warning(
+            "router classifier failed, defaulting to hybrid: %s: %s",
+            type(exc).__name__, exc,
+        )
+        label = "HYBRID"
 
     route_map = {"SQL": "sql", "RAG": "rag", "HYBRID": "hybrid", "NONE": "none"}
     route = route_map.get(label, "hybrid")

@@ -71,7 +71,8 @@ def ask(
         top_k:        RAG chunks after reranking (default config.RERANK_TOP_K = 8).
         stream:       If True, the returned dict carries a ``stream`` key
                       instead of ``answer`` (see Returns below).
-        model:        Ollama model override (default config.OLLAMA_MODEL).
+        model:        Model override (default config.LLM_MODEL). The provider
+                      itself always comes from config.LLM_PROVIDER.
         force_route:  Skip the router and use this route ('sql'|'rag'|'hybrid').
         verbose:      Print routing/retrieval details to stdout.
 
@@ -135,7 +136,7 @@ def ask(
         base = {
             "citations":   [],
             "route":       "none",
-            "model":       model or config.OLLAMA_MODEL,
+            "model":       model or config.LLM_MODEL,
             "decision":    decision,
             "rag_chunks":  None,
             "sql_records": None,
@@ -170,7 +171,7 @@ def ask(
             base = {
                 "citations":   [],
                 "route":       "latest_meeting",
-                "model":       model or config.OLLAMA_MODEL,
+                "model":       model or config.LLM_MODEL,
                 "decision":    decision,
                 "rag_chunks":  None,
                 "sql_records": None,
@@ -431,7 +432,7 @@ def main() -> None:
     parser.add_argument("--stream",     action="store_true")
     parser.add_argument("--route",      choices=["sql","rag","hybrid"], default=None,
                         help="Force a specific route (skip router)")
-    parser.add_argument("--model",      default=config.OLLAMA_MODEL)
+    parser.add_argument("--model",      default=config.LLM_MODEL)
     parser.add_argument("--verbose",    action="store_true", default=True)
     args = parser.parse_args()
 
