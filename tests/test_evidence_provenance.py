@@ -531,6 +531,39 @@ def test_normalize_and_offset_map_cannot_diverge():
         assert normalize(s) == _norm_with_map(s)[0]
 
 
+def test_partial_evidence_failure_still_requires_review():
+    """
+    Two good quotes and one that cannot be found is NOT a clean item.
+
+    Regression: review was keyed off `ok` (did anything verify?), so an item
+    with one unlocatable quote alongside valid ones kept needs_review=False
+    while carrying a review_reason — flagged in the data, invisible in the
+    review queue.  Found on the Houston run, on 2 financial items.
+    """
+    out = validate_item_evidence(
+        [_ref(CHUNK_38.chunk_id,
+              "the board approve the settlement and release agreement", ["motion_text"]),
+         _ref(CHUNK_40.chunk_id, "a sentence that was never spoken here", ["passed"])],
+        window_chunks=WINDOW, known_field_names=VOTE_FIELDS,
+    )
+
+    assert out.ok is True                 # something did verify
+    assert len(out.verified) == 1
+    assert out.needs_review is True       # ...but a human still has to look
+    assert out.reason == REVIEW_REASON_QUOTE_NOT_FOUND
+
+
+def test_fully_verified_item_does_not_require_review():
+    out = validate_item_evidence(
+        [_ref(CHUNK_38.chunk_id,
+              "the board approve the settlement and release agreement", ["motion_text"])],
+        window_chunks=WINDOW, known_field_names=VOTE_FIELDS,
+    )
+    assert out.ok is True
+    assert out.needs_review is False
+    assert out.reason is None
+
+
 def test_supports_is_filtered_to_real_field_names():
     out = validate_item_evidence(
         [_ref(CHUNK_38.chunk_id,

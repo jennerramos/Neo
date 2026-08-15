@@ -216,7 +216,20 @@ class EvidenceOutcome:
 
     @property
     def ok(self) -> bool:
+        """True when at least one reference verified."""
         return bool(self.verified)
+
+    @property
+    def needs_review(self) -> bool:
+        """
+        True when ANY reference failed, even if others verified.
+
+        Partial failure still means the model cited something we could not find,
+        so the item goes to a human.  Keying review off `ok` instead would let an
+        item with two good quotes and one fabricated one auto-accept while still
+        carrying a review_reason — flagged in the data, invisible in the queue.
+        """
+        return bool(self.review_reasons)
 
     @property
     def reason(self) -> Optional[str]:

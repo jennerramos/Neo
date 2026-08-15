@@ -986,7 +986,7 @@ def extract_votes(
             # ── Evidence policy ───────────────────────────────────────────
             # A claim nobody can trace to a quote does not auto-accept, no
             # matter how well the candidate window scored.
-            if not ev_outcome.ok:
+            if ev_outcome.needs_review:
                 needs_review = True
 
             vote_row = Vote(
@@ -1114,7 +1114,7 @@ def extract_financial(
                 discarded += 1
                 continue
 
-            if not ev_outcome.ok:
+            if ev_outcome.needs_review:
                 needs_review = True
 
             fin_row = FinancialItem(
@@ -1296,7 +1296,7 @@ def extract_personnel(
 
             # Evidence policy layers on top: an unidentifiable person is the
             # more serious flag, so it wins the single review_reason column.
-            if not ev_outcome.ok:
+            if ev_outcome.needs_review:
                 needs_review = True
             review_reason = _merge_review_reason(review_reason, ev_outcome.reason)
 

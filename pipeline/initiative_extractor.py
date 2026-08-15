@@ -288,7 +288,7 @@ def extract_initiatives(
             seen.add(dedup_key)
 
             conf, needs_review = _confidence(item, window.window_score)
-            if not ev_outcome.ok:
+            if ev_outcome.needs_review:
                 needs_review = True
 
             init_row = Initiative(
