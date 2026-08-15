@@ -42,12 +42,22 @@ from typing import Any, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sqlalchemy import create_engine, delete
+from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import sessionmaker
 
 import config
 from database.models import (
-    FinancialItem, Meeting, PersonnelAction, PipelineRun, School, Vote,
+    Chunk, ExtractionEvidence, FinancialItem, Meeting, PersonnelAction,
+    PipelineRun, School, Vote,
+)
+from pipeline.evidence import (
+    EVIDENCE_CONTRACT,
+    REVIEW_REASON_INVALID_CHUNK,
+    REVIEW_REASON_NO_EVIDENCE,
+    REVIEW_REASON_QUOTE_NOT_FOUND,
+    EvidenceOutcome,
+    build_preview,
+    validate_item_evidence,
 )
 from pipeline.states import eligible_inputs
 from pipeline.candidate_finder import (
@@ -69,6 +79,21 @@ AUTO_REVIEW_THRESHOLD = 0.65  # confidence below this → needs_review = True
 _CONF_FLOOR_VOTES      = 0.35
 _CONF_FLOOR_FINANCIAL  = 0.35
 _CONF_FLOOR_PERSONNEL  = 0.40
+
+# ── Unnamed-personnel policy ────────────────────────────────────────────────
+# A personnel action with no person_name is kept — "the board approved an
+# appointment here" is still a true and useful fact — but it can never be
+# auto-accepted, because the record does not say who it is about.
+#
+# This is a POLICY, deliberately independent of the evidence verification in
+# _name_in_evidence.  It fires on the absence of a name whatever the cause:
+# the LLM never extracted one, the transcript never said one, or verification
+# nulled an unverifiable one.  Confidence is pinned strictly below
+# AUTO_REVIEW_THRESHOLD so scoring changes can't quietly re-enable auto-accept.
+REVIEW_REASON_MISSING_NAME  = "missing_person_name"
+_UNNAMED_PERSONNEL_CONF_CAP = 0.60
+assert _UNNAMED_PERSONNEL_CONF_CAP < AUTO_REVIEW_THRESHOLD
+assert _UNNAMED_PERSONNEL_CONF_CAP >= _CONF_FLOOR_PERSONNEL  # keep, don't discard
 
 # Null-like strings the LLM returns instead of null
 _NULL_STRINGS = frozenset({
@@ -270,11 +295,19 @@ def _vocab(v: Any, allowed: frozenset, fallback: str) -> str:
     return s if s in allowed else fallback
 
 
-def _name_in_evidence(name: Optional[str], evidence: str) -> bool:
-    """Check whether a person name actually appears in the evidence text."""
+def _name_in_evidence(name: Optional[str], verify_text: str) -> bool:
+    """
+    Check whether a person name actually appears in the text the LLM read.
+
+    Pass the full `window.text`, NOT `window.evidence_snippet` — the snippet is
+    only the first 500 chars of the single highest-scoring chunk, while the model
+    is prompted with the whole window.  Checking against the snippet marks every
+    name found elsewhere in the window as hallucinated (it nulled 74% of
+    person_name values before this was caught).
+    """
     if not name:
         return True   # null name is always fine
-    return name.lower() in evidence.lower()
+    return name.lower() in verify_text.lower()
 
 
 # Known department/qualifier words that are NOT person names.
@@ -385,7 +418,7 @@ def _is_non_name(name: str) -> bool:
 # ---------------------------------------------------------------------------
 
 def _vote_confidence(
-    item: dict, evidence: str, window_score: float
+    item: dict, verify_text: str, window_score: float
 ) -> tuple[float, bool]:
     """
     Compute confidence for a vote extraction.
@@ -395,7 +428,7 @@ def _vote_confidence(
       +0.10  yes_count or no_count present (hard evidence)
 
     Penalties:
-      -0.20  each invented person name (not in evidence)
+      -0.20  each invented person name (not found in the window the LLM read)
       -0.15  motion_text present but fewer than 4 words (fragment)
 
     Auto-review regardless of score:
@@ -428,7 +461,7 @@ def _vote_confidence(
     penalty = 0.0
     for f in ("moved_by", "seconded_by"):
         name = _clean(item.get(f))
-        if name and not _name_in_evidence(name, evidence):
+        if name and not _name_in_evidence(name, verify_text):
             penalty += 0.20
 
     conf = (
@@ -507,8 +540,116 @@ def _financial_confidence(
     return conf, conf < AUTO_REVIEW_THRESHOLD
 
 
+# ---------------------------------------------------------------------------
+# Evidence provenance
+# ---------------------------------------------------------------------------
+
+# Field names each extractor may legitimately cite in an evidence "supports"
+# list.  Anything else the model invents is dropped rather than stored.
+_VOTE_FIELDS = frozenset({
+    "agenda_item", "motion_text", "topic_category", "moved_by", "seconded_by",
+    "vote_result_text", "yes_count", "no_count", "abstain_count", "absent_count",
+    "passed", "unanimous",
+})
+_FINANCIAL_FIELDS = frozenset({
+    "amount", "category", "description", "vendor", "fund_source",
+    "fiscal_year", "action_type",
+})
+_PERSONNEL_FIELDS = frozenset({
+    "person_name", "action_type", "position", "department",
+    "effective_date", "is_interim",
+})
+
+
+def resolve_evidence(
+    item: dict,
+    window,
+    *,
+    fields: frozenset,
+    db_chunk_ids: Optional[set[str]] = None,
+    fallback_snippet: str = "",
+) -> tuple[EvidenceOutcome, str]:
+    """
+    Validate one item's evidence array and build its display preview.
+
+    Returns (outcome, evidence_text).  The preview is centred on the first
+    verified quote; only when nothing verifies does it fall back to the old
+    blind window snippet, so no row is left with an empty evidence_text.
+    """
+    outcome = validate_item_evidence(
+        item.get("evidence"),
+        window_chunks     = window.chunks_by_id,
+        known_field_names = fields,
+        db_chunk_ids      = db_chunk_ids,
+    )
+
+    if not outcome.verified:
+        return outcome, fallback_snippet
+
+    primary = outcome.verified[0]
+    chunk   = window.chunks_by_id[primary.chunk_id]
+    preview, _, _ = build_preview(
+        chunk.text, primary.quote_start_char, primary.quote_end_char
+    )
+    return outcome, preview
+
+
+def _evidence_rows(outcome: EvidenceOutcome, meeting_id: int, **parent) -> list[ExtractionEvidence]:
+    """Turn verified references into ORM rows for one parent item."""
+    return [
+        ExtractionEvidence(
+            meeting_id       = meeting_id,
+            chunk_id         = v.chunk_id,
+            exact_quote      = v.quote,
+            supports         = v.supports or None,
+            start_time_sec   = v.start_time,
+            end_time_sec     = v.end_time,
+            quote_start_char = v.quote_start_char,
+            quote_end_char   = v.quote_end_char,
+            chunk_sha        = v.chunk_sha,
+            in_overlap       = v.in_overlap,
+            **parent,
+        )
+        for v in outcome.verified
+    ]
+
+
+def _merge_review_reason(existing: Optional[str], new: Optional[str]) -> Optional[str]:
+    """
+    Combine review reasons, keeping the first-set one.
+
+    missing_person_name (policy, migration 0005) is recorded ahead of evidence
+    reasons: a row nobody can identify is the more serious problem to show a
+    reviewer first.
+    """
+    return existing or new
+
+
+def _apply_unnamed_personnel_policy(
+    person_name: Optional[str], conf: float, needs_review: bool
+) -> tuple[float, bool, Optional[str]]:
+    """
+    Apply the unnamed-personnel policy to an already-scored row.
+
+    Returns (confidence, needs_review, review_reason).
+
+    Named rows pass through untouched — this function decides nothing about
+    whether a name is *correct*, only about what to do when one is absent.
+    Unnamed rows are preserved, forced into review, capped below the
+    auto-accept threshold, and stamped with REVIEW_REASON_MISSING_NAME.
+    """
+    if _clean(person_name):
+        return conf, needs_review, None
+
+    return (
+        round(min(conf, _UNNAMED_PERSONNEL_CONF_CAP), 3),
+        True,
+        REVIEW_REASON_MISSING_NAME,
+    )
+
+
 def _personnel_confidence(
-    item: dict, evidence: str, window_score: float
+    item: dict, verify_text: str, window_score: float
 ) -> tuple[float, bool]:
     """
     Compute confidence for a personnel action.
@@ -518,11 +659,11 @@ def _personnel_confidence(
       position     0.50
 
     Bonuses (post-base):
-      +0.20  person_name present AND found in evidence
+      +0.20  person_name present AND found in the window the LLM read
       +0.15  effective_date present
 
     Penalties:
-      -0.30  person_name present but NOT in evidence (hallucination risk)
+      -0.30  person_name present but NOT in that window (hallucination risk)
       -0.15  position is a bare title (no department qualifier)
 
     Pattern saturation denominator: 8
@@ -537,7 +678,7 @@ def _personnel_confidence(
 
     # Name bonus/penalty
     name          = _clean(item.get("person_name"))
-    name_in_ev    = _name_in_evidence(name, evidence) if name else True
+    name_in_ev    = _name_in_evidence(name, verify_text) if name else True
     name_bonus    = 0.20 if (name and name_in_ev)    else 0.0
     name_penalty  = 0.30 if (name and not name_in_ev) else 0.0
 
@@ -585,8 +726,11 @@ Return a JSON ARRAY (may be []).  Each element EXACTLY:
   "abstain_count":     integer or null,
   "absent_count":      integer or null,
   "passed":            true | false | null,
-  "unanimous":         true | false | null
+  "unanimous":         true | false | null,
+  "evidence":          [ EVIDENCE OBJECT, ... ]   // REQUIRED, see below
 }}
+
+{evidence_contract}
 
 INCLUDE:
 - Formal recorded votes with "so moved", "I move", "motion to approve", "the board votes", etc.
@@ -630,8 +774,11 @@ Return a JSON ARRAY (may be []).  Each element EXACTLY:
   "vendor":       "company or entity receiving funds, or null",
   "fund_source":  "general fund | bond | grant | state allocation | other, or null",
   "fiscal_year":  "e.g. FY2024-25, or null",
-  "action_type":  "one value from the action_type vocabulary"
+  "action_type":  "one value from the action_type vocabulary",
+  "evidence":     [ EVIDENCE OBJECT, ... ]   // REQUIRED, see below
 }}
+
+{evidence_contract}
 
 INCLUDE:
 - Contracts awarded to vendors with stated dollar values.
@@ -688,8 +835,11 @@ Return a JSON ARRAY (may be []).  Each element EXACTLY:
   "position":      "exact job title e.g. 'Vice Chancellor of Finance and Administration' or null",
   "department":    "department or division, or null",
   "effective_date":"text date e.g. 'July 1, 2025' or 'immediately', or null",
-  "is_interim":    true | false
+  "is_interim":    true | false,
+  "evidence":      [ EVIDENCE OBJECT, ... ]   // REQUIRED, see below
 }}
+
+{evidence_contract}
 
 RULES:
 - Include ONLY formal board-approved personnel actions for college staff and administrators.
@@ -728,6 +878,20 @@ _CONSIDER_MOTION_RE = re.compile(
 )
 
 
+def _meeting_chunk_ids(db_session, meeting_id: int) -> set[str]:
+    """
+    chunk_ids this meeting actually has rows for in the chunks table.
+
+    Extraction reads chunks.jsonl, but evidence rows carry a foreign key to
+    chunks.chunk_id.  Checking membership up front turns a would-be
+    IntegrityError mid-run into an ordinary invalid_evidence_chunk flag.
+    """
+    rows = db_session.execute(
+        select(Chunk.chunk_id).where(Chunk.meeting_id == meeting_id)
+    ).scalars().all()
+    return set(rows)
+
+
 def extract_votes(
     meeting: Meeting,
     school: School,
@@ -740,15 +904,24 @@ def extract_votes(
     discarded = 0
     seen_ts:      list[Optional[float]] = []
     seen_motions: set[str]              = set()   # content-based dedup
+    db_chunks = _meeting_chunk_ids(db_session, meeting.meeting_id)
 
     for window in windows:
-        items = _call_llm(_VOTE_PROMPT.format(window=window.text), "votes")
+        items = _call_llm(
+            _VOTE_PROMPT.format(window=window.text, evidence_contract=EVIDENCE_CONTRACT),
+            "votes",
+        )
 
         for item in items:
             if not isinstance(item, dict):
                 continue
 
-            evidence    = window.evidence_snippet
+            ev_outcome, evidence = resolve_evidence(
+                item, window,
+                fields           = _VOTE_FIELDS,
+                db_chunk_ids     = db_chunks,
+                fallback_snippet = window.evidence_snippet,
+            )
             motion_text = _clean(item.get("motion_text"))
             result_text = _clean(item.get("vote_result_text"))
 
@@ -767,7 +940,9 @@ def extract_votes(
                 discarded += 1
                 continue
 
-            conf, needs_review = _vote_confidence(item, evidence, window.window_score)
+            # Names are verified against the whole window (what the LLM read),
+            # not `evidence` — see _name_in_evidence.
+            conf, needs_review = _vote_confidence(item, window.text, window.window_score)
 
             # ── Hard discard 3: confidence floor ──────────────────────────
             if conf < _CONF_FLOOR_VOTES:
@@ -801,14 +976,20 @@ def extract_votes(
             # Null-normalize hallucinated person names
             moved_by    = _clean(item.get("moved_by"))
             seconded_by = _clean(item.get("seconded_by"))
-            if moved_by and not _name_in_evidence(moved_by, evidence):
+            if moved_by and not _name_in_evidence(moved_by, window.text):
                 moved_by    = None
                 needs_review = True
-            if seconded_by and not _name_in_evidence(seconded_by, evidence):
+            if seconded_by and not _name_in_evidence(seconded_by, window.text):
                 seconded_by = None
                 needs_review = True
 
-            db_session.add(Vote(
+            # ── Evidence policy ───────────────────────────────────────────
+            # A claim nobody can trace to a quote does not auto-accept, no
+            # matter how well the candidate window scored.
+            if not ev_outcome.ok:
+                needs_review = True
+
+            vote_row = Vote(
                 meeting_id       = meeting.meeting_id,
                 school_id        = school.school_id,
                 school_slug      = school.slug,
@@ -833,7 +1014,10 @@ def extract_votes(
                 extractor_version= EXTRACTOR_VERSION,
                 confidence       = conf,
                 needs_review     = needs_review,
-            ))
+                review_reason    = ev_outcome.reason,
+            )
+            vote_row.evidence = _evidence_rows(ev_outcome, meeting.meeting_id)
+            db_session.add(vote_row)
             inserted += 1
 
     if discarded:
@@ -859,25 +1043,36 @@ def extract_financial(
     inserted  = 0
     discarded = 0
     seen: set[tuple] = set()
+    db_chunks = _meeting_chunk_ids(db_session, meeting.meeting_id)
 
     for window in windows:
-        evidence = window.evidence_snippet
+        snippet = window.evidence_snippet
 
         # ── Evidence-level discard: outside-money mention ──────────────────
         # If the window's evidence reads like a state/federal allocation report,
         # don't even send it to the LLM.  Candidate finder should have caught
         # this, but this is a safety net.
-        if _is_outside_money(evidence):
-            _log_discard(meeting.video_id, "financial_items", {"evidence": evidence[:200]},
+        if _is_outside_money(snippet):
+            _log_discard(meeting.video_id, "financial_items", {"evidence": snippet[:200]},
                          "outside-money pattern in evidence: not a board decision")
             discarded += 1
             continue
 
-        items = _call_llm(_FINANCIAL_PROMPT.format(window=window.text), "financial")
+        items = _call_llm(
+            _FINANCIAL_PROMPT.format(window=window.text, evidence_contract=EVIDENCE_CONTRACT),
+            "financial",
+        )
 
         for item in items:
             if not isinstance(item, dict):
                 continue
+
+            ev_outcome, evidence = resolve_evidence(
+                item, window,
+                fields           = _FINANCIAL_FIELDS,
+                db_chunk_ids     = db_chunks,
+                fallback_snippet = snippet,
+            )
 
             amount = _float_amount(item.get("amount"))
             if amount is None:
@@ -919,7 +1114,10 @@ def extract_financial(
                 discarded += 1
                 continue
 
-            db_session.add(FinancialItem(
+            if not ev_outcome.ok:
+                needs_review = True
+
+            fin_row = FinancialItem(
                 meeting_id       = meeting.meeting_id,
                 school_id        = school.school_id,
                 school_slug      = school.slug,
@@ -940,7 +1138,10 @@ def extract_financial(
                 extractor_version= EXTRACTOR_VERSION,
                 confidence       = conf,
                 needs_review     = needs_review,
-            ))
+                review_reason    = ev_outcome.reason,
+            )
+            fin_row.evidence = _evidence_rows(ev_outcome, meeting.meeting_id)
+            db_session.add(fin_row)
             inserted += 1
 
     if discarded:
@@ -958,23 +1159,34 @@ def extract_personnel(
     school: School,
     windows: list[CandidateWindow],
     db_session,
-) -> int:
+) -> tuple[int, int]:
+    """Returns (rows_inserted, rows_flagged REVIEW_REASON_MISSING_NAME)."""
     db_session.execute(
         delete(PersonnelAction).where(PersonnelAction.meeting_id == meeting.meeting_id)
     )
 
     inserted  = 0
     discarded = 0
+    unnamed   = 0
     seen: set[tuple] = set()
+    db_chunks = _meeting_chunk_ids(db_session, meeting.meeting_id)
 
     for window in windows:
-        evidence = window.evidence_snippet
-
-        items = _call_llm(_PERSONNEL_PROMPT.format(window=window.text), "personnel")
+        items = _call_llm(
+            _PERSONNEL_PROMPT.format(window=window.text, evidence_contract=EVIDENCE_CONTRACT),
+            "personnel",
+        )
 
         for item in items:
             if not isinstance(item, dict):
                 continue
+
+            ev_outcome, evidence = resolve_evidence(
+                item, window,
+                fields           = _PERSONNEL_FIELDS,
+                db_chunk_ids     = db_chunks,
+                fallback_snippet = window.evidence_snippet,
+            )
 
             action   = _vocab(item.get("action_type"), _PERSONNEL_ACTIONS, "other")
             position = _clean(item.get("position"))
@@ -1004,11 +1216,16 @@ def extract_personnel(
                 continue
 
             # ── Fix: name embedded in position field ──────────────────────
+            # Only mine the position field for a surname when the model didn't
+            # give us one.  Splitting unconditionally amputated real titles:
+            # "Director of Student Life" → "Director of Student", because the
+            # trailing word is capitalized and not a known qualifier.  And the
+            # position is only rewritten if the surname actually checks out.
             person_name = _clean(item.get("person_name"))
-            position, extracted_name = _split_name_from_position(position)
-            if extracted_name and not person_name:
-                if _name_in_evidence(extracted_name, evidence):
-                    person_name = extracted_name
+            if not person_name:
+                split_position, extracted_name = _split_name_from_position(position)
+                if extracted_name and _name_in_evidence(extracted_name, window.text):
+                    position, person_name = split_position, extracted_name
 
             # ── Null-normalize non-name person_name ───────────────────────
             # e.g. person_name="Counseling" (department), "Union", "Major" (rank)
@@ -1044,7 +1261,7 @@ def extract_personnel(
                 continue
             seen.add(dedup_key)
 
-            conf, needs_review = _personnel_confidence(item, evidence, window.window_score)
+            conf, needs_review = _personnel_confidence(item, window.text, window.window_score)
 
             # ── Hard discard: confidence floor ────────────────────────────
             if conf < _CONF_FLOOR_PERSONNEL:
@@ -1053,8 +1270,8 @@ def extract_personnel(
                 discarded += 1
                 continue
 
-            # Null-normalize person_name not found in evidence
-            if person_name and not _name_in_evidence(person_name, evidence):
+            # Null-normalize person_name not found in the window the LLM read
+            if person_name and not _name_in_evidence(person_name, window.text):
                 person_name  = None
                 needs_review = True
 
@@ -1068,11 +1285,26 @@ def extract_personnel(
                 needs_review = True
                 conf = round(min(conf, 0.60), 3)
 
+            # ── Policy gate: runs last, after every scoring adjustment above,
+            # so nothing downstream can raise an unnamed row back into
+            # auto-accept territory.
+            conf, needs_review, review_reason = _apply_unnamed_personnel_policy(
+                person_name, conf, needs_review
+            )
+            if review_reason == REVIEW_REASON_MISSING_NAME:
+                unnamed += 1
+
+            # Evidence policy layers on top: an unidentifiable person is the
+            # more serious flag, so it wins the single review_reason column.
+            if not ev_outcome.ok:
+                needs_review = True
+            review_reason = _merge_review_reason(review_reason, ev_outcome.reason)
+
             is_interim = bool(item.get("is_interim")) or (
                 "interim" in (position or "").lower()
             )
 
-            db_session.add(PersonnelAction(
+            pers_row = PersonnelAction(
                 meeting_id       = meeting.meeting_id,
                 school_id        = school.school_id,
                 school_slug      = school.slug,
@@ -1091,13 +1323,22 @@ def extract_personnel(
                 extractor_version= EXTRACTOR_VERSION,
                 confidence       = conf,
                 needs_review     = needs_review,
-            ))
+                review_reason    = review_reason,
+            )
+            pers_row.evidence = _evidence_rows(ev_outcome, meeting.meeting_id)
+            db_session.add(pers_row)
             inserted += 1
 
     if discarded:
         log.debug("personnel: %d discarded for meeting %s", discarded, meeting.video_id)
+    if unnamed:
+        log.warning(
+            "personnel: %d/%d row(s) for meeting %s have no person_name — "
+            "flagged %s, held below auto-accept",
+            unnamed, inserted, meeting.video_id, REVIEW_REASON_MISSING_NAME,
+        )
 
-    return inserted
+    return inserted, unnamed
 
 
 # ---------------------------------------------------------------------------
@@ -1123,7 +1364,8 @@ def extract_meeting(
             config.PROCESSED_DIR / school.slug / meeting.video_id / "chunks.jsonl"
         )
 
-    result = {"votes": 0, "financial": 0, "personnel": 0, "status": "success"}
+    result = {"votes": 0, "financial": 0, "personnel": 0,
+              "personnel_unnamed": 0, "status": "success"}
 
     if not jsonl_path.exists():
         result["status"] = "error: chunks.jsonl not found"
@@ -1147,7 +1389,9 @@ def extract_meeting(
 
         if do_personnel:
             windows = all_windows.get(ExtractionTarget.PERSONNEL, [])
-            result["personnel"] = extract_personnel(meeting, school, windows, db_session)
+            result["personnel"], result["personnel_unnamed"] = extract_personnel(
+                meeting, school, windows, db_session
+            )
 
         # Preserve 'indexed' (later pipeline stage) — don't downgrade. For
         # meetings that haven't hit indexer.py yet, advance processed → extracted.
@@ -1255,6 +1499,7 @@ def main() -> None:
         print(f"Meetings : {total}\n")
 
         total_votes = total_financial = total_personnel = errors = 0
+        total_unnamed = 0
 
         for i, (meeting, school) in enumerate(meetings, 1):
             title_short = (meeting.title or meeting.video_id)[:50]
@@ -1274,11 +1519,16 @@ def main() -> None:
                 total_votes      += result["votes"]
                 total_financial  += result["financial"]
                 total_personnel  += result["personnel"]
+                total_unnamed    += result["personnel_unnamed"]
+                unnamed_note = (
+                    f" ({result['personnel_unnamed']} unnamed→review)"
+                    if result["personnel_unnamed"] else ""
+                )
                 print(
                     f"          ✅  "
                     f"votes={result['votes']}  "
                     f"financial={result['financial']}  "
-                    f"personnel={result['personnel']}  "
+                    f"personnel={result['personnel']}{unnamed_note}  "
                     f"({result['duration']:.0f}s)"
                 )
 
@@ -1294,7 +1544,9 @@ def main() -> None:
     print(f"  Meetings   : {total}")
     print(f"  Votes      : {total_votes}")
     print(f"  Financial  : {total_financial}")
-    print(f"  Personnel  : {total_personnel}")
+    print(f"  Personnel  : {total_personnel}"
+          + (f"  ({total_unnamed} unnamed → {REVIEW_REASON_MISSING_NAME})"
+             if total_unnamed else ""))
     print(f"  Errors     : {errors}")
     print(f"  LLM        : {describe()}")
     print(f"  Usage      : {u.summary()}")
@@ -1307,6 +1559,12 @@ def main() -> None:
     print('  psql -U postgres -d neo_v2 -c "SELECT topic_category, COUNT(*), ROUND(AVG(confidence)::numeric,2), SUM(needs_review::int) FROM votes GROUP BY 1 ORDER BY 2 DESC;"')
     print('  psql -U postgres -d neo_v2 -c "SELECT action_type, COUNT(*), ROUND(AVG(confidence)::numeric,2), SUM(needs_review::int) FROM financial_items GROUP BY 1 ORDER BY 2 DESC;"')
     print('  psql -U postgres -d neo_v2 -c "SELECT action_type, COUNT(*), ROUND(AVG(confidence)::numeric,2), SUM(needs_review::int) FROM personnel_actions GROUP BY 1 ORDER BY 2 DESC;"')
+    if total_unnamed:
+        print()
+        print(f"Personnel rows needing a name ({total_unnamed}):")
+        print('  psql -U postgres -d neo_v2 -c "SELECT action_id, school_slug, action_type, '
+              "position, confidence FROM personnel_actions WHERE review_reason = "
+              f"'{REVIEW_REASON_MISSING_NAME}' ORDER BY action_id;\"")
     print()
     print("Discard logs:")
     print("  ls -la Neo_v2/data/extraction_discards/")

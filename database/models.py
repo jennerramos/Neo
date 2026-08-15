@@ -287,8 +287,12 @@ class Vote(Base):
     reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     reviewed_by: Mapped[Optional[str]] = mapped_column(Text)
     review_notes: Mapped[Optional[str]] = mapped_column(Text)
+    review_reason: Mapped[Optional[str]] = mapped_column(Text)   # machine-written, see 0006
 
     meeting: Mapped["Meeting"] = relationship("Meeting", back_populates="votes")
+    evidence: Mapped[list["ExtractionEvidence"]] = relationship(
+        "ExtractionEvidence", back_populates="vote", cascade="all, delete-orphan"
+    )
 
     def __repr__(self) -> str:
         return f"<Vote vote_id={self.vote_id} passed={self.passed} conf={self.confidence:.2f}>"
@@ -336,8 +340,12 @@ class FinancialItem(Base):
     reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     reviewed_by: Mapped[Optional[str]] = mapped_column(Text)
     review_notes: Mapped[Optional[str]] = mapped_column(Text)
+    review_reason: Mapped[Optional[str]] = mapped_column(Text)   # machine-written, see 0006
 
     meeting: Mapped["Meeting"] = relationship("Meeting", back_populates="financial_items")
+    evidence: Mapped[list["ExtractionEvidence"]] = relationship(
+        "ExtractionEvidence", back_populates="financial_item", cascade="all, delete-orphan"
+    )
 
     def __repr__(self) -> str:
         return f"<FinancialItem item_id={self.item_id} amount={self.amount} action={self.action_type!r}>"
@@ -379,12 +387,18 @@ class PersonnelAction(Base):
     extractor_version: Mapped[str] = mapped_column(Text, nullable=False, server_default="v2.0")
     confidence: Mapped[float] = mapped_column(Float, nullable=False, server_default="0.0")
     needs_review: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    # Written by the extractor, not by a reviewer — see migration 0005.  Says
+    # WHY the row was flagged; review_notes below is the human's reply to it.
+    review_reason: Mapped[Optional[str]] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     reviewed_by: Mapped[Optional[str]] = mapped_column(Text)
     review_notes: Mapped[Optional[str]] = mapped_column(Text)
 
     meeting: Mapped["Meeting"] = relationship("Meeting", back_populates="personnel_actions")
+    evidence: Mapped[list["ExtractionEvidence"]] = relationship(
+        "ExtractionEvidence", back_populates="personnel_action", cascade="all, delete-orphan"
+    )
 
     def __repr__(self) -> str:
         return f"<PersonnelAction action_id={self.action_id} type={self.action_type!r} pos={self.position!r}>"
@@ -435,10 +449,81 @@ class Initiative(Base):
     needs_review: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
+    review_reason: Mapped[Optional[str]] = mapped_column(Text)   # machine-written, see 0006
+
     meeting: Mapped["Meeting"] = relationship("Meeting", back_populates="initiatives")
+    evidence: Mapped[list["ExtractionEvidence"]] = relationship(
+        "ExtractionEvidence", back_populates="initiative", cascade="all, delete-orphan"
+    )
 
     def __repr__(self) -> str:
         return f"<Initiative initiative_id={self.initiative_id} name={self.initiative_name!r}>"
+
+
+# ---------------------------------------------------------------------------
+# 9b. extraction_evidence  (source-chunk provenance, migration 0006)
+# ---------------------------------------------------------------------------
+
+class ExtractionEvidence(Base):
+    """
+    One verified quotation linking an extracted claim to its source chunk.
+
+    Rows are written only for quotes located character-for-character in the
+    cited chunk (see pipeline/evidence.py).  Exactly one parent FK is set, which
+    the DB enforces with ck_extraction_evidence_one_parent.
+    """
+    __tablename__ = "extraction_evidence"
+
+    evidence_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    vote_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("votes.vote_id", ondelete="CASCADE")
+    )
+    financial_item_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("financial_items.item_id", ondelete="CASCADE")
+    )
+    personnel_action_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("personnel_actions.action_id", ondelete="CASCADE")
+    )
+    initiative_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("initiatives.initiative_id", ondelete="CASCADE")
+    )
+
+    meeting_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("meetings.meeting_id", ondelete="CASCADE"), nullable=False
+    )
+    chunk_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("chunks.chunk_id", ondelete="CASCADE"), nullable=False
+    )
+
+    exact_quote: Mapped[str] = mapped_column(Text, nullable=False)
+    supports: Mapped[Optional[list]] = mapped_column(ARRAY(Text))
+
+    start_time_sec: Mapped[Optional[float]] = mapped_column(Float)
+    end_time_sec: Mapped[Optional[float]] = mapped_column(Float)
+    quote_start_char: Mapped[Optional[int]] = mapped_column(Integer)
+    quote_end_char: Mapped[Optional[int]] = mapped_column(Integer)
+
+    chunk_sha: Mapped[str] = mapped_column(Text, nullable=False)
+    in_overlap: Mapped[bool] = mapped_column(Boolean, server_default="false", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    vote: Mapped[Optional["Vote"]] = relationship("Vote", back_populates="evidence")
+    financial_item: Mapped[Optional["FinancialItem"]] = relationship(
+        "FinancialItem", back_populates="evidence"
+    )
+    personnel_action: Mapped[Optional["PersonnelAction"]] = relationship(
+        "PersonnelAction", back_populates="evidence"
+    )
+    initiative: Mapped[Optional["Initiative"]] = relationship(
+        "Initiative", back_populates="evidence"
+    )
+
+    def __repr__(self) -> str:
+        return (f"<ExtractionEvidence {self.evidence_id} chunk={self.chunk_id} "
+                f"quote={self.exact_quote[:40]!r}>")
 
 
 # ---------------------------------------------------------------------------

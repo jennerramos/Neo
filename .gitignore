@@ -67,3 +67,6 @@ Thumbs.db
 # ── Logs ──────────────────────────────────────────────────────────────────────
 *.log
 logs/
+
+# local DB snapshots (restore points, not source)
+backups/

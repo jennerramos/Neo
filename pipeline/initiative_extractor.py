@@ -36,6 +36,10 @@ from sqlalchemy.orm import sessionmaker
 
 import config
 from database.models import Initiative, Meeting, PipelineRun, School
+from pipeline.evidence import EVIDENCE_CONTRACT
+from pipeline.extractor import (
+    _evidence_rows, _meeting_chunk_ids, resolve_evidence,
+)
 from pipeline.states import eligible_inputs
 from pipeline.candidate_finder import (
     CandidateWindow, ExtractionTarget, find_all_candidates,
@@ -50,6 +54,13 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 EXTRACTOR_VERSION = "v2.5"
+
+# Fields an evidence quote may claim to support (see pipeline/evidence.py).
+_INITIATIVE_FIELDS = frozenset({
+    "initiative_name", "category", "description", "action_type",
+    "observed_action", "stated_rationale", "claimed_outcome",
+    "measured_outcome", "outcome_timeframe",
+})
 AUTO_REVIEW_THRESHOLD = 0.60
 
 _NULL_STRINGS = frozenset({
@@ -211,8 +222,11 @@ Return a JSON ARRAY (may be []).  Each element EXACTLY:
   "stated_rationale":  "reason they gave, or null",
   "claimed_outcome":   "projected benefit they stated, or null",
   "measured_outcome":  "ONLY if hard numbers are explicitly in the text above, else null",
-  "outcome_timeframe": "e.g. 'Fall 2026', 'within 2 years', or null"
+  "outcome_timeframe": "e.g. 'Fall 2026', 'within 2 years', or null",
+  "evidence":          [ EVIDENCE OBJECT, ... ]   // REQUIRED, see below
 }}
+
+{evidence_contract}
 
 RULES:
 - Include only substantive initiatives, not routine procedural items.
@@ -245,13 +259,24 @@ def extract_initiatives(
 
     inserted = 0
     seen: set[str] = set()   # dedup by initiative_name.lower()
+    db_chunks = _meeting_chunk_ids(db_session, meeting.meeting_id)
 
     for window in windows:
-        items = _call_llm(_INITIATIVE_PROMPT.format(window=window.text), "initiatives")
+        items = _call_llm(
+            _INITIATIVE_PROMPT.format(window=window.text, evidence_contract=EVIDENCE_CONTRACT),
+            "initiatives",
+        )
 
         for item in items:
             if not isinstance(item, dict):
                 continue
+
+            ev_outcome, evidence = resolve_evidence(
+                item, window,
+                fields           = _INITIATIVE_FIELDS,
+                db_chunk_ids     = db_chunks,
+                fallback_snippet = window.evidence_snippet,
+            )
 
             name = _clean(item.get("initiative_name"))
             if not name:
@@ -263,8 +288,10 @@ def extract_initiatives(
             seen.add(dedup_key)
 
             conf, needs_review = _confidence(item, window.window_score)
+            if not ev_outcome.ok:
+                needs_review = True
 
-            db_session.add(Initiative(
+            init_row = Initiative(
                 meeting_id       = meeting.meeting_id,
                 school_id        = school.school_id,
                 school_slug      = school.slug,
@@ -279,14 +306,17 @@ def extract_initiatives(
                 measured_outcome = _clean(item.get("measured_outcome")),
                 outcome_timeframe= _clean(item.get("outcome_timeframe")),
                 chunk_ids        = window.chunk_ids,
-                evidence_text    = window.evidence_snippet,
+                evidence_text    = evidence,
                 source_type      = window.source_type,
                 start_time_sec   = window.start_time_sec,
                 end_time_sec     = window.end_time_sec,
                 extractor_version= EXTRACTOR_VERSION,
                 confidence       = conf,
                 needs_review     = needs_review,
-            ))
+                review_reason    = ev_outcome.reason,
+            )
+            init_row.evidence = _evidence_rows(ev_outcome, meeting.meeting_id)
+            db_session.add(init_row)
             inserted += 1
 
     return inserted
