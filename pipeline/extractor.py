@@ -3,7 +3,8 @@ Neo v2 — Phase 6: Structured Extractor v2.5
 
 Two-step pipeline per meeting:
   1. candidate_finder.py  scores chunks with regex/keyword patterns (zero LLM)
-  2. extractor.py         sends each candidate window to Ollama for structured JSON
+  2. extractor.py         sends each candidate window to the configured LLM
+                          (PIPELINE_LLM_*, default local Ollama) for structured JSON
 
 Every inserted row includes full provenance:
   chunk_ids, evidence_text, source_type, start/end time,
@@ -41,7 +42,6 @@ from typing import Any, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import requests
 from sqlalchemy import create_engine, delete
 from sqlalchemy.orm import sessionmaker
 
@@ -53,6 +53,7 @@ from pipeline.states import eligible_inputs
 from pipeline.candidate_finder import (
     CandidateWindow, ExtractionTarget, find_all_candidates,
 )
+from pipeline.llm_json import call_json, check_llm, describe, reset_usage, usage
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s %(message)s")
 log = logging.getLogger(__name__)
@@ -62,7 +63,6 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 EXTRACTOR_VERSION     = "v2.7"
-OLLAMA_TIMEOUT        = 120   # seconds per call
 AUTO_REVIEW_THRESHOLD = 0.65  # confidence below this → needs_review = True
 
 # Raised confidence floors — discard anything below these per rubric
@@ -197,74 +197,32 @@ def _log_discard(video_id: str, table: str, item: dict, reason: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Ollama client
+# LLM client — runs on the "extract" profile (PIPELINE_LLM_*, default Ollama)
 # ---------------------------------------------------------------------------
 
-def _call_ollama(prompt: str) -> list[dict]:
-    """
-    POST to Ollama /api/chat with format=json, temperature=0.
-    Returns list of dicts. Returns [] on any failure.
-    """
-    payload = {
-        "model":  config.OLLAMA_MODEL,
-        "stream": False,
-        "format": "json",
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You are a precise board meeting analyst specializing in "
-                    "community college governance. "
-                    "Return ONLY valid JSON matching the schema exactly. "
-                    "No explanation, no markdown fences, no extra keys. "
-                    "Nullable fields must be JSON null, never the string 'null' or 'N/A'."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ],
-        "options": {"temperature": 0.0, "num_predict": 2048},
-    }
-    try:
-        resp = requests.post(
-            f"{config.OLLAMA_HOST}/api/chat",
-            json=payload,
-            timeout=OLLAMA_TIMEOUT,
-        )
-        resp.raise_for_status()
-        raw = resp.json()["message"]["content"].strip()
-        raw = re.sub(r"^```(?:json)?\s*", "", raw)
-        raw = re.sub(r"\s*```$", "", raw)
-        parsed = json.loads(raw)
-        if isinstance(parsed, list):
-            return parsed
-        if isinstance(parsed, dict):
-            for key in ("items", "votes", "financial_items", "personnel_actions",
-                        "results", "data", "extractions"):
-                if key in parsed and isinstance(parsed[key], list):
-                    return parsed[key]
-            return [parsed]
-        return []
-    except requests.exceptions.ConnectionError:
-        log.error("Ollama not running at %s", config.OLLAMA_HOST)
-        return []
-    except requests.exceptions.Timeout:
-        log.warning("Ollama timed out")
-        return []
-    except (json.JSONDecodeError, KeyError) as e:
-        log.warning("Ollama bad JSON: %s", e)
-        return []
-    except Exception as e:
-        log.warning("Ollama call failed: %s", e)
-        return []
+_SYSTEM_PROMPT = (
+    "You are a precise board meeting analyst specializing in "
+    "community college governance. "
+    "Return ONLY valid JSON matching the schema exactly. "
+    "No explanation, no markdown fences, no extra keys. "
+    "Nullable fields must be JSON null, never the string 'null' or 'N/A'."
+)
+
+# Keys the model may wrap its array in, tried in order.
+_UNWRAP_KEYS = (
+    "items", "votes", "financial_items", "personnel_actions",
+    "results", "data", "extractions",
+)
 
 
-def check_ollama() -> bool:
-    try:
-        resp = requests.get(f"{config.OLLAMA_HOST}/api/tags", timeout=5)
-        models = [m["name"] for m in resp.json().get("models", [])]
-        return any(config.OLLAMA_MODEL in m for m in models)
-    except Exception:
-        return False
+def _call_llm(prompt: str, label: str = "") -> list[dict]:
+    """Structured-JSON call. Returns a list of dicts, or [] on failure."""
+    return call_json(
+        system=_SYSTEM_PROMPT,
+        prompt=prompt,
+        unwrap_keys=_UNWRAP_KEYS,
+        label=label,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -784,7 +742,7 @@ def extract_votes(
     seen_motions: set[str]              = set()   # content-based dedup
 
     for window in windows:
-        items = _call_ollama(_VOTE_PROMPT.format(window=window.text))
+        items = _call_llm(_VOTE_PROMPT.format(window=window.text), "votes")
 
         for item in items:
             if not isinstance(item, dict):
@@ -915,7 +873,7 @@ def extract_financial(
             discarded += 1
             continue
 
-        items = _call_ollama(_FINANCIAL_PROMPT.format(window=window.text))
+        items = _call_llm(_FINANCIAL_PROMPT.format(window=window.text), "financial")
 
         for item in items:
             if not isinstance(item, dict):
@@ -1012,7 +970,7 @@ def extract_personnel(
     for window in windows:
         evidence = window.evidence_snippet
 
-        items = _call_ollama(_PERSONNEL_PROMPT.format(window=window.text))
+        items = _call_llm(_PERSONNEL_PROMPT.format(window=window.text), "personnel")
 
         for item in items:
             if not isinstance(item, dict):
@@ -1242,8 +1200,7 @@ def main() -> None:
 
     print("Neo v2 — Phase 6: Structured Extraction v2.5")
     print("=" * 55)
-    print(f"Model      : {config.OLLAMA_MODEL}")
-    print(f"Ollama     : {config.OLLAMA_HOST}")
+    print(f"LLM        : {describe()}")
     print(f"Extractors : "
           f"{'votes ' if do_votes else ''}"
           f"{'financial ' if do_financial else ''}"
@@ -1253,13 +1210,18 @@ def main() -> None:
           f"financial≥{_CONF_FLOOR_FINANCIAL} "
           f"personnel≥{_CONF_FLOOR_PERSONNEL}")
 
-    if not check_ollama():
-        print(f"\n❌  Cannot reach Ollama at {config.OLLAMA_HOST}")
-        print(f"    Start:  ollama serve")
-        print(f"    Pull:   ollama pull {config.OLLAMA_MODEL}")
+    ok, detail = check_llm()
+    if not ok:
+        print(f"\n❌  Extraction LLM unavailable — {detail}")
+        if config.PIPELINE_LLM_PROVIDER == "ollama":
+            print(f"    Start:  ollama serve")
+            print(f"    Pull:   ollama pull {config.PIPELINE_LLM_MODEL}")
+        else:
+            print(f"    Check PIPELINE_LLM_PROVIDER / PIPELINE_LLM_MODEL / PIPELINE_LLM_API_KEY")
         sys.exit(1)
 
-    print(f"\n✅  Ollama ready — {config.OLLAMA_MODEL}\n")
+    print(f"\n✅  LLM ready — {detail}\n")
+    reset_usage()
 
     engine  = create_engine(config.DATABASE_URL, echo=config.SQL_ECHO)
     Session = sessionmaker(bind=engine)
@@ -1326,6 +1288,7 @@ def main() -> None:
 
         session.commit()
 
+    u = usage()
     print("\n" + "=" * 55)
     print("Phase 6 complete:")
     print(f"  Meetings   : {total}")
@@ -1333,6 +1296,12 @@ def main() -> None:
     print(f"  Financial  : {total_financial}")
     print(f"  Personnel  : {total_personnel}")
     print(f"  Errors     : {errors}")
+    print(f"  LLM        : {describe()}")
+    print(f"  Usage      : {u.summary()}")
+    if u.truncations:
+        print(f"\n⚠️  {u.truncations} call(s) hit the {config.PIPELINE_LLM_MAX_TOKENS}-token cap and")
+        print("    returned incomplete JSON — those windows produced NO rows.")
+        print("    Raise PIPELINE_LLM_MAX_TOKENS and re-run with --reextract.")
     print()
     print("Validate:")
     print('  psql -U postgres -d neo_v2 -c "SELECT topic_category, COUNT(*), ROUND(AVG(confidence)::numeric,2), SUM(needs_review::int) FROM votes GROUP BY 1 ORDER BY 2 DESC;"')
