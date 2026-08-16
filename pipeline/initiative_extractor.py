@@ -53,7 +53,14 @@ log = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-EXTRACTOR_VERSION = "v2.5"
+# v2.6 — every initiative now carries verified source-chunk evidence.
+#
+# Bump this whenever extraction output changes shape.  It stayed at v2.5 through
+# the evidence rollout, which made a half-finished corpus unreadable: a killed
+# run left old and new rows side by side with the same version stamp, and the
+# only way to tell them apart was whether evidence rows happened to exist.
+# The version column is what makes "which rows are current?" answerable.
+EXTRACTOR_VERSION = "v2.6"
 
 # Fields an evidence quote may claim to support (see pipeline/evidence.py).
 _INITIATIVE_FIELDS = frozenset({
