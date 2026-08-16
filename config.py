@@ -77,10 +77,9 @@ HUGGINGFACE_TOKEN: str = os.getenv("HUGGINGFACE_TOKEN", "")
 # LLM — Ollama (local; offline extraction pipeline)
 # ---------------------------------------------------------------------------
 #
-# These stay Ollama-specific on purpose. pipeline/extractor.py and
-# pipeline/initiative_extractor.py talk to Ollama directly with format="json",
-# which has no portable equivalent across cloud providers. Offline batch runs
-# on the local GPU are free, so they stay here.
+# Kept as the local-Ollama defaults that BOTH neutral namespaces below fall
+# back to: LLM_* (serving) and PIPELINE_LLM_* (extraction). Setting these two
+# alone still gives you today's fully-local behavior on every path.
 #
 OLLAMA_HOST: str  = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "qwen2.5:14b")
@@ -129,6 +128,55 @@ LLM_CONNECT_TIMEOUT: float = float(os.getenv("LLM_CONNECT_TIMEOUT", "5"))
 LLM_READ_TIMEOUT:    float = float(os.getenv("LLM_READ_TIMEOUT", "120"))
 LLM_ROUTER_CONNECT_TIMEOUT: float = float(os.getenv("LLM_ROUTER_CONNECT_TIMEOUT", "2"))
 LLM_ROUTER_READ_TIMEOUT:    float = float(os.getenv("LLM_ROUTER_READ_TIMEOUT", "5"))
+
+# ---------------------------------------------------------------------------
+# LLM — extraction pipeline (offline batch: extractor + initiative_extractor)
+# ---------------------------------------------------------------------------
+#
+# A SEPARATE namespace from LLM_* above, and it deliberately does NOT inherit
+# from it. Unset PIPELINE_LLM_* falls back to OLLAMA_HOST/OLLAMA_MODEL — never
+# to LLM_* — so a .env that points /ask at a paid provider does not silently
+# move extraction there too. That matters here more than on the serving path:
+# /ask is one call per question, extraction is N candidate windows x 4
+# extraction types per meeting across the whole corpus.
+#
+#   PIPELINE_LLM_PROVIDER=ollama                                  # default
+#   PIPELINE_LLM_PROVIDER=gemini PIPELINE_LLM_MODEL=gemini-3.5-flash
+#   PIPELINE_LLM_PROVIDER=openai PIPELINE_LLM_MODEL=gpt-4o-mini
+#
+# anthropic is NOT usable here: it has no JSON mode and llm/providers/anthropic
+# raises LLMConfigError rather than silently returning prose.
+#
+PIPELINE_LLM_PROVIDER: str = os.getenv("PIPELINE_LLM_PROVIDER", "ollama").strip().lower()
+PIPELINE_LLM_MODEL:    str = os.getenv("PIPELINE_LLM_MODEL", OLLAMA_MODEL)
+PIPELINE_LLM_BASE_URL: str = os.getenv("PIPELINE_LLM_BASE_URL", "")
+PIPELINE_LLM_API_KEY:  str = os.getenv("PIPELINE_LLM_API_KEY", "")
+
+# Extraction runs at temperature 0 — structured JSON, no sampling wanted. This
+# is NOT LLM_TEMPERATURE's 0.1; both extractors sent 0.0 pre-refactor.
+PIPELINE_LLM_TEMPERATURE: float = float(os.getenv("PIPELINE_LLM_TEMPERATURE", "0"))
+
+# 2048 = the num_predict both extractors sent pre-refactor. Truncation is
+# nastier here than on the serving path: a cut-off answer is a visibly short
+# sentence, but a cut-off JSON array fails to parse, yields zero rows, and
+# reads downstream as "this meeting had no votes". pipeline/llm_json.py logs a
+# loud TRUNCATED warning when a provider reports hitting this cap.
+PIPELINE_LLM_MAX_TOKENS: int = int(os.getenv("PIPELINE_LLM_MAX_TOKENS", "2048"))
+
+# Reasoning models spend thinking tokens out of MAX_TOKENS before emitting the
+# first JSON character, so effort defaults off — same reason the query router
+# pins it to "none".
+PIPELINE_LLM_REASONING_EFFORT: str = os.getenv(
+    "PIPELINE_LLM_REASONING_EFFORT", "none"
+).strip().lower()
+
+# Read timeout covers the slower of the two callers (initiative_extractor sent
+# 150s, extractor 120s). Retries default higher than the serving path's 2:
+# extraction fans out enough calls to hit cloud rate limits that a single
+# /ask never sees.
+PIPELINE_LLM_CONNECT_TIMEOUT: float = float(os.getenv("PIPELINE_LLM_CONNECT_TIMEOUT", "5"))
+PIPELINE_LLM_READ_TIMEOUT:    float = float(os.getenv("PIPELINE_LLM_READ_TIMEOUT", "150"))
+PIPELINE_LLM_MAX_RETRIES:     int   = int(os.getenv("PIPELINE_LLM_MAX_RETRIES", "5"))
 
 # ---------------------------------------------------------------------------
 # Embeddings — nomic-embed-text

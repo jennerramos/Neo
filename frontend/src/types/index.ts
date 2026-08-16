@@ -230,6 +230,11 @@ export interface EvidenceChunk {
   meeting_date: string | null;
   meeting_id: number | null;
   score: number | null;
+  // Source-chunk provenance (migration 0006). Optional: records extracted
+  // before it have no evidence rows and arrive with verified === false.
+  chunk_id?: string | null;
+  supports?: string[];
+  verified?: boolean;
 }
 
 export interface SupportingMeeting {

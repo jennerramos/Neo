@@ -53,6 +53,16 @@ class EvidenceChunk(BaseModel):
     meeting_id:    Optional[int] = None
     score:         Optional[float] = None
 
+    # Source-chunk provenance (migration 0006). The query has built these
+    # since the provenance rollout, but they were missing here, so Pydantic
+    # dropped them on the way out and every quote reached the frontend
+    # looking unverified. `verified=True` means the text was located
+    # character-for-character in `chunk_id`; False means it is a legacy
+    # evidence_text snippet with no chunk behind it.
+    chunk_id:      Optional[str] = None
+    supports:      List[str] = []
+    verified:      bool = False
+
 
 class SupportingMeeting(BaseModel):
     meeting_id:    int

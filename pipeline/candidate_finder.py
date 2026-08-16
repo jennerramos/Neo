@@ -245,8 +245,16 @@ class CandidateWindow:
     source_type:   str = field(init=False)
 
     def __post_init__(self) -> None:
+        # Chunks are labelled with their STABLE chunk_id, not their position in
+        # this window.  The model cites these IDs back in its evidence array and
+        # we resolve them against the meeting's real chunks — a list position
+        # would be meaningless the moment window boundaries move.
         self.text = "\n\n".join(
-            f"[chunk {c.chunk_index}]  {c.text}" for c in self.chunks
+            f"[[CHUNK_ID: {c.chunk_id}]]\n"
+            f"[[START_TIME: {c.start_time if c.start_time is not None else 'null'}]]\n"
+            f"[[END_TIME: {c.end_time if c.end_time is not None else 'null'}]]\n"
+            f"{c.text}"
+            for c in self.chunks
         )
         self.chunk_ids = [c.chunk_id for c in self.chunks]
         times     = [c.start_time for c in self.chunks if c.start_time is not None]
@@ -262,9 +270,21 @@ class CandidateWindow:
 
     @property
     def evidence_snippet(self) -> str:
-        """First 500 chars of the highest net-scored chunk."""
+        """
+        First 500 chars of the highest net-scored chunk.
+
+        FALLBACK ONLY.  This is a blind slice of the window — it is not derived
+        from any extracted claim and frequently does not contain it.  Prefer a
+        preview built around a verified quote (pipeline/evidence.py:
+        build_preview); use this only when an item has no verified evidence.
+        """
         best = max(self.chunks, key=lambda c: c.score)
         return best.text[:500]
+
+    @property
+    def chunks_by_id(self) -> dict[str, ChunkRecord]:
+        """Chunk lookup for validating model-cited chunk_ids against this window."""
+        return {c.chunk_id: c for c in self.chunks}
 
 
 # ---------------------------------------------------------------------------
