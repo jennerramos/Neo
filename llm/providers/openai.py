@@ -54,12 +54,13 @@ class OpenAIProvider:
     def __init__(
         self,
         *,
-        model:           str,
-        api_key:         str,
-        base_url:        str = "",
-        connect_timeout: float = 5.0,
-        read_timeout:    float = 120.0,
-        max_retries:     int = 2,
+        model:            str,
+        api_key:          str,
+        base_url:         str = "",
+        connect_timeout:  float = 5.0,
+        read_timeout:     float = 120.0,
+        max_retries:      int = 2,
+        reasoning_effort: str = "",
     ) -> None:
         if not api_key:
             raise LLMConfigError(
@@ -67,6 +68,17 @@ class OpenAIProvider:
             )
         self.model = model
         self._key = api_key
+        self._reasoning_effort = (reasoning_effort or "").strip().lower()
+
+        # Reasoning-class models (o-series, gpt-5.x) take a different parameter
+        # envelope from chat models: `max_completion_tokens` instead of
+        # `max_tokens`, and only the default temperature. There is no reliable
+        # way to tell which class a model id belongs to from its name — the
+        # naming space keeps moving — so these start unknown and are learned
+        # from the API's own 400 on the first call, then remembered for the
+        # life of the handle (which get_provider caches per process).
+        self._use_completion_tokens = False
+        self._send_temperature      = True
         self._client = OpenAI(
             api_key=api_key,
             base_url=base_url or self.DEFAULT_BASE_URL,
@@ -88,7 +100,79 @@ class OpenAIProvider:
 
     def _extra(self) -> dict:
         """Vendor-specific kwargs merged into every request. Hook for subclasses."""
+        if self._reasoning_effort:
+            return {"reasoning_effort": self._reasoning_effort}
         return {}
+
+    def _token_params(self, temperature: float, max_tokens: int) -> dict:
+        """The half of the request that differs between chat and reasoning models."""
+        if self._use_completion_tokens:
+            params = {"max_completion_tokens": max_tokens}
+        else:
+            params = {"max_tokens": max_tokens}
+        if self._send_temperature:
+            params["temperature"] = temperature
+        return params
+
+    def _adapt(self, exc: Exception) -> bool:
+        """Learn this model's parameter dialect from a 400 and retry.
+
+        Returns True if something was changed and the call is worth repeating.
+        Each branch flips at most once, so a genuinely bad request still fails
+        instead of looping.
+        """
+        if not isinstance(exc, openai.BadRequestError):
+            return False
+
+        msg = self._scrub(str(exc))
+        low = msg.lower()
+        changed = False
+
+        if "max_completion_tokens" in low and not self._use_completion_tokens:
+            self._use_completion_tokens = True
+            changed = True
+        if (
+            "temperature" in low
+            and ("unsupported" in low or "does not support" in low)
+            and self._send_temperature
+        ):
+            self._send_temperature = False
+            changed = True
+        if "reasoning_effort" in low and self._reasoning_effort:
+            self._reasoning_effort = ""
+            changed = True
+
+        if changed:
+            log.info(
+                "%s/%s: adopting reasoning-model parameters "
+                "(max_completion_tokens=%s, send_temperature=%s, reasoning_effort=%r)",
+                self.provider, self.model, self._use_completion_tokens,
+                self._send_temperature, self._reasoning_effort,
+            )
+        return changed
+
+    def _create(self, *, system: str, messages: list[dict], temperature: float,
+                max_tokens: int, extra: dict):
+        """chat.completions.create, retrying once per learned dialect mismatch.
+
+        At most three adaptations are possible (token param, temperature,
+        reasoning_effort) and each flips only once, so this terminates.
+        """
+        last: Optional[Exception] = None
+        for _ in range(4):
+            try:
+                return self._client.chat.completions.create(
+                    model=self.model,
+                    messages=self._msgs(system, messages),
+                    **self._token_params(temperature, max_tokens),
+                    **self._extra(),
+                    **extra,
+                )
+            except Exception as exc:  # noqa: BLE001 - mapped by the caller
+                last = exc
+                if not self._adapt(exc):
+                    self._raise(exc)
+        self._raise(last)
 
     def _scrub(self, text: str) -> str:
         """Never let the API key reach a log line or an HTTP error body."""
@@ -112,6 +196,11 @@ class OpenAIProvider:
             raise LLMRateLimited(f"{self.provider} rate limit hit: {msg}") from exc
         if isinstance(exc, openai.APIConnectionError):
             raise LLMUnavailable(f"Cannot reach {self.provider}: {msg}") from exc
+        # Reasoning models 400 here instead of returning finish_reason="length"
+        # when the whole budget went to thinking. It reads like a transport
+        # error but it is a configuration one, and retrying cannot fix it.
+        if isinstance(exc, openai.BadRequestError) and "output limit" in msg.lower():
+            raise self._empty_answer_error() from exc
         if isinstance(exc, openai.APIStatusError):
             raise LLMUnavailable(
                 f"{self.provider} returned HTTP {exc.status_code}: {msg}"
@@ -158,17 +247,13 @@ class OpenAIProvider:
         json_mode:   bool = False,
     ) -> LLMResult:
         kw = {"response_format": {"type": "json_object"}} if json_mode else {}
-        try:
-            resp = self._client.chat.completions.create(
-                model=self.model,
-                messages=self._msgs(system, messages),
-                temperature=temperature,
-                max_tokens=max_tokens,
-                **self._extra(),
-                **kw,
-            )
-        except Exception as exc:  # noqa: BLE001 - mapped into the taxonomy
-            self._raise(exc)
+        resp = self._create(
+            system=system,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            extra=kw,
+        )
 
         choice = resp.choices[0] if resp.choices else None
         text   = (choice.message.content if choice else None) or ""
@@ -203,15 +288,15 @@ class OpenAIProvider:
     ) -> Iterator[str]:
         emitted = False
         finish: Optional[str] = None
+        stream_iter = self._create(
+            system=system,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            extra={"stream": True},
+        )
         try:
-            for chunk in self._client.chat.completions.create(
-                model=self.model,
-                messages=self._msgs(system, messages),
-                temperature=temperature,
-                max_tokens=max_tokens,
-                stream=True,
-                **self._extra(),
-            ):
+            for chunk in stream_iter:
                 if not chunk.choices:
                     continue
                 choice = chunk.choices[0]

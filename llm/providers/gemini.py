@@ -24,23 +24,15 @@ than a blank trustee answer.
 """
 from __future__ import annotations
 
-from typing import Optional
-
 from llm.providers.openai import OpenAIProvider
 
 
 class GeminiProvider(OpenAIProvider):
+    """Nothing but a base URL — ``reasoning_effort`` now lives in the base,
+    which every OpenAI-wire reasoning model needs too."""
+
     provider = "gemini"
     DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
-
-    def __init__(self, *, reasoning_effort: str = "", **kwargs) -> None:
-        self._reasoning_effort = (reasoning_effort or "").strip().lower()
-        super().__init__(**kwargs)
-
-    def _extra(self) -> dict:
-        if self._reasoning_effort:
-            return {"reasoning_effort": self._reasoning_effort}
-        return {}
 
 
 __all__ = ["GeminiProvider"]

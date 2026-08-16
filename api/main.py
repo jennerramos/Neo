@@ -14,7 +14,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 import config
-from api.routers import schools, meetings, votes, financials, insights, ask, export
+from api.routers import (
+    schools, meetings, votes, financials, insights, patterns, ask, export,
+)
 
 log = logging.getLogger("neo.startup")
 
@@ -101,6 +103,7 @@ def create_app() -> FastAPI:
     app.include_router(votes.router)
     app.include_router(financials.router)
     app.include_router(insights.router)
+    app.include_router(patterns.router)
     app.include_router(ask.router)
     app.include_router(export.router)
 

@@ -318,9 +318,35 @@ def get_insight_detail(db: Session, insight_id: str) -> Optional[dict]:
         f"under the theme '{theme_label}', with the board taking a '{action_type}' stance."
     )
 
-    # Evidence chunks from evidence_text field
+    # ── Evidence ───────────────────────────────────────────────────────────
+    # Prefer verified source-chunk provenance (extraction_evidence, migration
+    # 0006): each row is a quotation located character-for-character in a named
+    # chunk, so a reader can open the transcript at that timestamp and check it.
+    # Rows extracted before 0006 have no evidence rows — fall back to the older
+    # evidence_text snippet so those insights keep rendering.
     evidence = []
-    if matched.get("evidence_text"):
+    ev_rows = db.execute(text("""
+        SELECT chunk_id, exact_quote, supports, start_time_sec, end_time_sec
+        FROM extraction_evidence
+        WHERE initiative_id = :iid
+        ORDER BY start_time_sec NULLS LAST, evidence_id
+    """), {"iid": matched["initiative_id"]}).fetchall()
+
+    for r in ev_rows:
+        evidence.append({
+            "text":          r.exact_quote,
+            "speaker":       None,
+            "timestamp_sec": r.start_time_sec,
+            "meeting_title": matched.get("meeting_title"),
+            "meeting_date":  str(matched["published_date"]) if matched.get("published_date") else None,
+            "meeting_id":    matched["meeting_id"],
+            "score":         matched["confidence"],
+            "chunk_id":      r.chunk_id,
+            "supports":      list(r.supports) if r.supports else [],
+            "verified":      True,
+        })
+
+    if not evidence and matched.get("evidence_text"):
         evidence.append({
             "text":          matched["evidence_text"],
             "speaker":       None,
@@ -329,6 +355,9 @@ def get_insight_detail(db: Session, insight_id: str) -> Optional[dict]:
             "meeting_date":  str(matched["published_date"]) if matched.get("published_date") else None,
             "meeting_id":    matched["meeting_id"],
             "score":         matched["confidence"],
+            "chunk_id":      None,
+            "supports":      [],
+            "verified":      False,
         })
 
     # Related votes from the same meetings

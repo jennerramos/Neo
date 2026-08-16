@@ -31,16 +31,20 @@ from typing import Optional, Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import requests
 from sqlalchemy import create_engine, delete
 from sqlalchemy.orm import sessionmaker
 
 import config
 from database.models import Initiative, Meeting, PipelineRun, School
+from pipeline.evidence import EVIDENCE_CONTRACT
+from pipeline.extractor import (
+    _evidence_rows, _meeting_chunk_ids, resolve_evidence,
+)
 from pipeline.states import eligible_inputs
 from pipeline.candidate_finder import (
     CandidateWindow, ExtractionTarget, find_all_candidates,
 )
+from pipeline.llm_json import call_json, check_llm, describe, reset_usage, usage
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s %(message)s")
 log = logging.getLogger(__name__)
@@ -49,8 +53,21 @@ log = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-EXTRACTOR_VERSION = "v2.5"
-OLLAMA_TIMEOUT    = 150
+# v2.6 — every initiative now carries verified source-chunk evidence.
+#
+# Bump this whenever extraction output changes shape.  It stayed at v2.5 through
+# the evidence rollout, which made a half-finished corpus unreadable: a killed
+# run left old and new rows side by side with the same version stamp, and the
+# only way to tell them apart was whether evidence rows happened to exist.
+# The version column is what makes "which rows are current?" answerable.
+EXTRACTOR_VERSION = "v2.6"
+
+# Fields an evidence quote may claim to support (see pipeline/evidence.py).
+_INITIATIVE_FIELDS = frozenset({
+    "initiative_name", "category", "description", "action_type",
+    "observed_action", "stated_rationale", "claimed_outcome",
+    "measured_outcome", "outcome_timeframe",
+})
 AUTO_REVIEW_THRESHOLD = 0.60
 
 _NULL_STRINGS = frozenset({
@@ -84,55 +101,30 @@ _ACTION_TYPES = frozenset({
 
 
 # ---------------------------------------------------------------------------
-# Ollama client (shared pattern)
+# LLM client — runs on the "extract" profile (PIPELINE_LLM_*, default Ollama)
 # ---------------------------------------------------------------------------
 
-def _call_ollama(prompt: str) -> list[dict]:
-    payload = {
-        "model":  config.OLLAMA_MODEL,
-        "stream": False,
-        "format": "json",
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You are a precise board meeting analyst specializing in "
-                    "community college governance. "
-                    "Return ONLY valid JSON matching the schema exactly. "
-                    "No markdown fences, no extra keys. "
-                    "Nullable fields must be JSON null, never the string 'null' or 'N/A'. "
-                    "CRITICAL: Never conflate stated rationale with measured outcomes."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ],
-        "options": {"temperature": 0.0, "num_predict": 2048},
-    }
-    try:
-        resp = requests.post(
-            f"{config.OLLAMA_HOST}/api/chat",
-            json=payload,
-            timeout=OLLAMA_TIMEOUT,
-        )
-        resp.raise_for_status()
-        raw = resp.json()["message"]["content"].strip()
-        raw = re.sub(r"^```(?:json)?\s*", "", raw)
-        raw = re.sub(r"\s*```$", "", raw)
-        parsed = json.loads(raw)
-        if isinstance(parsed, list):
-            return parsed
-        if isinstance(parsed, dict):
-            for key in ("items", "initiatives", "results", "data"):
-                if key in parsed and isinstance(parsed[key], list):
-                    return parsed[key]
-            return [parsed]
-        return []
-    except requests.exceptions.ConnectionError:
-        log.error("Ollama not running at %s", config.OLLAMA_HOST)
-        return []
-    except (requests.exceptions.Timeout, json.JSONDecodeError, KeyError, Exception) as e:
-        log.warning("Ollama call failed: %s", e)
-        return []
+_SYSTEM_PROMPT = (
+    "You are a precise board meeting analyst specializing in "
+    "community college governance. "
+    "Return ONLY valid JSON matching the schema exactly. "
+    "No markdown fences, no extra keys. "
+    "Nullable fields must be JSON null, never the string 'null' or 'N/A'. "
+    "CRITICAL: Never conflate stated rationale with measured outcomes."
+)
+
+# Keys the model may wrap its array in, tried in order.
+_UNWRAP_KEYS = ("items", "initiatives", "results", "data")
+
+
+def _call_llm(prompt: str, label: str = "") -> list[dict]:
+    """Structured-JSON call. Returns a list of dicts, or [] on failure."""
+    return call_json(
+        system=_SYSTEM_PROMPT,
+        prompt=prompt,
+        unwrap_keys=_UNWRAP_KEYS,
+        label=label,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -237,8 +229,11 @@ Return a JSON ARRAY (may be []).  Each element EXACTLY:
   "stated_rationale":  "reason they gave, or null",
   "claimed_outcome":   "projected benefit they stated, or null",
   "measured_outcome":  "ONLY if hard numbers are explicitly in the text above, else null",
-  "outcome_timeframe": "e.g. 'Fall 2026', 'within 2 years', or null"
+  "outcome_timeframe": "e.g. 'Fall 2026', 'within 2 years', or null",
+  "evidence":          [ EVIDENCE OBJECT, ... ]   // REQUIRED, see below
 }}
+
+{evidence_contract}
 
 RULES:
 - Include only substantive initiatives, not routine procedural items.
@@ -271,13 +266,24 @@ def extract_initiatives(
 
     inserted = 0
     seen: set[str] = set()   # dedup by initiative_name.lower()
+    db_chunks = _meeting_chunk_ids(db_session, meeting.meeting_id)
 
     for window in windows:
-        items = _call_ollama(_INITIATIVE_PROMPT.format(window=window.text))
+        items = _call_llm(
+            _INITIATIVE_PROMPT.format(window=window.text, evidence_contract=EVIDENCE_CONTRACT),
+            "initiatives",
+        )
 
         for item in items:
             if not isinstance(item, dict):
                 continue
+
+            ev_outcome, evidence = resolve_evidence(
+                item, window,
+                fields           = _INITIATIVE_FIELDS,
+                db_chunk_ids     = db_chunks,
+                fallback_snippet = window.evidence_snippet,
+            )
 
             name = _clean(item.get("initiative_name"))
             if not name:
@@ -289,8 +295,10 @@ def extract_initiatives(
             seen.add(dedup_key)
 
             conf, needs_review = _confidence(item, window.window_score)
+            if ev_outcome.needs_review:
+                needs_review = True
 
-            db_session.add(Initiative(
+            init_row = Initiative(
                 meeting_id       = meeting.meeting_id,
                 school_id        = school.school_id,
                 school_slug      = school.slug,
@@ -305,14 +313,17 @@ def extract_initiatives(
                 measured_outcome = _clean(item.get("measured_outcome")),
                 outcome_timeframe= _clean(item.get("outcome_timeframe")),
                 chunk_ids        = window.chunk_ids,
-                evidence_text    = window.evidence_snippet,
+                evidence_text    = evidence,
                 source_type      = window.source_type,
                 start_time_sec   = window.start_time_sec,
                 end_time_sec     = window.end_time_sec,
                 extractor_version= EXTRACTOR_VERSION,
                 confidence       = conf,
                 needs_review     = needs_review,
-            ))
+                review_reason    = ev_outcome.reason,
+            )
+            init_row.evidence = _evidence_rows(ev_outcome, meeting.meeting_id)
+            db_session.add(init_row)
             inserted += 1
 
     return inserted
@@ -380,22 +391,22 @@ def main() -> None:
 
     print("Neo v2 — Phase 6.5: Initiative Extraction")
     print("=" * 55)
-    print(f"Model   : {config.OLLAMA_MODEL}")
+    print(f"LLM     : {describe()}")
     print(f"Version : {EXTRACTOR_VERSION}")
     print()
 
-    # Verify Ollama
-    try:
-        resp = requests.get(f"{config.OLLAMA_HOST}/api/tags", timeout=5)
-        models = [m["name"] for m in resp.json().get("models", [])]
-        if not any(config.OLLAMA_MODEL in m for m in models):
-            print(f"❌  Model {config.OLLAMA_MODEL} not found.")
-            sys.exit(1)
-    except Exception:
-        print(f"❌  Ollama not reachable at {config.OLLAMA_HOST}")
+    ok, detail = check_llm()
+    if not ok:
+        print(f"❌  Extraction LLM unavailable — {detail}")
+        if config.PIPELINE_LLM_PROVIDER == "ollama":
+            print(f"    Start:  ollama serve")
+            print(f"    Pull:   ollama pull {config.PIPELINE_LLM_MODEL}")
+        else:
+            print("    Check PIPELINE_LLM_PROVIDER / PIPELINE_LLM_MODEL / PIPELINE_LLM_API_KEY")
         sys.exit(1)
 
-    print(f"✅  Ollama ready — {config.OLLAMA_MODEL}\n")
+    print(f"✅  LLM ready — {detail}\n")
+    reset_usage()
 
     engine  = create_engine(config.DATABASE_URL, echo=config.SQL_ECHO)
     Session = sessionmaker(bind=engine)
@@ -453,11 +464,18 @@ def main() -> None:
 
         session.commit()
 
+    u = usage()
     print("\n" + "=" * 55)
     print("Phase 6.5 complete:")
     print(f"  Meetings     : {total}")
     print(f"  Initiatives  : {total_initiatives}")
     print(f"  Errors       : {errors}")
+    print(f"  LLM          : {describe()}")
+    print(f"  Usage        : {u.summary()}")
+    if u.truncations:
+        print(f"\n⚠️  {u.truncations} call(s) hit the {config.PIPELINE_LLM_MAX_TOKENS}-token cap and")
+        print("    returned incomplete JSON — those windows produced NO rows.")
+        print("    Raise PIPELINE_LLM_MAX_TOKENS and re-run with --reextract.")
     print()
     print("Validate:")
     print('  psql -U postgres -d neo_v2 -c "SELECT category, COUNT(*), ROUND(AVG(confidence)::numeric,2) AS avg_conf, SUM(needs_review::int) AS flagged FROM initiatives GROUP BY category ORDER BY 2 DESC;"')
