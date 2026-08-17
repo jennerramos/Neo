@@ -113,21 +113,32 @@ LLM_MAX_TOKENS:  int   = int(os.getenv("LLM_MAX_TOKENS", "1024"))
 #   gemini: none | low | medium | high
 LLM_REASONING_EFFORT: str = os.getenv("LLM_REASONING_EFFORT", "").strip().lower()
 
-# The query-router classifier is a one-word call on a 5s budget. Letting a
-# reasoning model think there burns the budget (and the money) for no gain, so
-# it defaults to "none" independently of the generation setting above.
+# The query-router classifier is a one-word call. Letting a reasoning model
+# think there burns the budget (and the money) for no gain, so it defaults to
+# "none" independently of the generation setting above.
 LLM_ROUTER_REASONING_EFFORT: str = os.getenv(
     "LLM_ROUTER_REASONING_EFFORT", "none"
 ).strip().lower()
 LLM_ROUTER_MAX_TOKENS: int = int(os.getenv("LLM_ROUTER_MAX_TOKENS", "16"))
 
-# Two timeout profiles. Generation on qwen2.5:14b can legitimately take ~60s;
-# the router classifier is a 5-token call that must fail fast so a hung LLM
-# can't wedge every /ask.
+# Two timeout profiles. Generation can legitimately take ~60s; the router
+# classifier is a one-word call that should fail fast so a hung LLM can't wedge
+# every /ask.
+#
+# "Fast" is relative to the provider, though, and the old 2s/5s router budget
+# was measured against Ollama on localhost. A cloud provider answers the same
+# one-word question in 4.0-5.2s, which straddled the 5s read budget and made
+# routing a coin toss: on a timeout `_llm_route` falls back to "hybrid", so
+# off-topic questions never reached NONE and specific lookups never reached
+# SQL. It read like model nondeterminism and was a stopwatch.
+#
+# 15s is still an order of magnitude below generation's budget, and costs
+# nothing in the normal case — a classifier that answers in 4s returns in 4s.
+# Drop it back to ~5s only if you are serving from a local Ollama.
 LLM_CONNECT_TIMEOUT: float = float(os.getenv("LLM_CONNECT_TIMEOUT", "5"))
 LLM_READ_TIMEOUT:    float = float(os.getenv("LLM_READ_TIMEOUT", "120"))
-LLM_ROUTER_CONNECT_TIMEOUT: float = float(os.getenv("LLM_ROUTER_CONNECT_TIMEOUT", "2"))
-LLM_ROUTER_READ_TIMEOUT:    float = float(os.getenv("LLM_ROUTER_READ_TIMEOUT", "5"))
+LLM_ROUTER_CONNECT_TIMEOUT: float = float(os.getenv("LLM_ROUTER_CONNECT_TIMEOUT", "5"))
+LLM_ROUTER_READ_TIMEOUT:    float = float(os.getenv("LLM_ROUTER_READ_TIMEOUT", "15"))
 
 # ---------------------------------------------------------------------------
 # LLM — extraction pipeline (offline batch: extractor + initiative_extractor)
@@ -209,6 +220,22 @@ QDRANT_LOCAL_PATH: str = os.getenv("QDRANT_LOCAL_PATH", "")
 RETRIEVAL_TOP_K: int  = int(os.getenv("RETRIEVAL_TOP_K", "20"))   # candidates from Qdrant
 RERANK_TOP_K: int     = int(os.getenv("RERANK_TOP_K", "8"))        # passed to LLM after rerank
 RERANKER_MODEL: str   = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
+
+# Which cross-encoder runtime to score with:
+#   torch  sentence-transformers CrossEncoder. The default, and what every
+#          indexed answer to date was reranked with.
+#   onnx   fastembed TextCrossEncoder. Measured 5-32x faster on CPU, which
+#          matters a great deal on a small VPS and not at all on the GPU
+#          workstation. Note fastembed does NOT offer bge-reranker-v2-m3, so
+#          switching backend also means switching model — set RERANKER_MODEL
+#          to one of TextCrossEncoder.list_supported_models().
+RERANKER_BACKEND: str = os.getenv("RERANKER_BACKEND", "torch").strip().lower()
+
+# Thread cap for the ONNX runtime. Left unset it inherits fastembed's default,
+# which reads the *host* core count and oversubscribes a cpu-limited container.
+RERANKER_THREADS: int | None = (
+    int(os.environ["RERANKER_THREADS"]) if os.getenv("RERANKER_THREADS") else None
+)
 
 # ---------------------------------------------------------------------------
 # Pipeline thresholds (Quality Gate)

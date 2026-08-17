@@ -70,15 +70,48 @@ def _get_sparse_model():
     return _sparse_model
 
 
+class _OnnxCrossEncoder:
+    """fastembed's TextCrossEncoder behind sentence-transformers' surface.
+
+    Exposes ``predict(pairs)`` so ``_rerank`` never learns which backend it
+    got. fastembed scores one query against many documents rather than taking
+    arbitrary pairs; ``_rerank`` only ever builds pairs from a single query, so
+    the shapes line up — but we assert it rather than assume it, because a
+    future caller passing mixed queries would otherwise get silently wrong
+    scores instead of an error.
+    """
+
+    def __init__(self, model_name: str, threads: Optional[int] = None):
+        from fastembed.rerank.cross_encoder import TextCrossEncoder
+        self._enc = TextCrossEncoder(model_name=model_name, threads=threads)
+
+    def predict(self, pairs: list[tuple[str, str]]) -> list[float]:
+        if not pairs:
+            return []
+        query = pairs[0][0]
+        if any(q != query for q, _ in pairs):
+            raise ValueError(
+                "_OnnxCrossEncoder.predict expects one query per call; "
+                "got pairs spanning multiple queries."
+            )
+        return list(self._enc.rerank(query, [doc for _, doc in pairs]))
+
+
 def _get_reranker():
     global _reranker
     if _reranker is None:
-        from sentence_transformers import CrossEncoder
-        _reranker = CrossEncoder(
-            config.RERANKER_MODEL,
-            max_length=512,
-            device="cuda" if _cuda_available() else "cpu",
-        )
+        if config.RERANKER_BACKEND == "onnx":
+            _reranker = _OnnxCrossEncoder(
+                config.RERANKER_MODEL,
+                threads=config.RERANKER_THREADS,
+            )
+        else:
+            from sentence_transformers import CrossEncoder
+            _reranker = CrossEncoder(
+                config.RERANKER_MODEL,
+                max_length=512,
+                device="cuda" if _cuda_available() else "cpu",
+            )
     return _reranker
 
 
@@ -270,7 +303,9 @@ def _rerank(
     reranker = _get_reranker()
     texts    = [c.get("text", "") for c in candidates]
     pairs    = [(query, t) for t in texts]
-    scores   = reranker.predict(pairs).tolist()
+    scores   = reranker.predict(pairs)
+    # sentence-transformers hands back a numpy array; the ONNX adapter a list.
+    scores   = scores.tolist() if hasattr(scores, "tolist") else list(scores)
 
     for c, s in zip(candidates, scores):
         c["score"] = round(float(s), 6)

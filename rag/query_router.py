@@ -65,7 +65,13 @@ class RouteDecision(TypedDict):
 # Keep this list NARROW. When in doubt, let RAG try — if there's nothing in
 # the transcripts the LLM will say so. Don't block queries the vector DB should answer.
 _OFF_TOPIC_PATTERNS = re.compile(
+    # Weather needs care rather than a blanket \bweather\b: boards genuinely
+    # discuss inclement-weather closures and storm damage. These variants are
+    # the "what is it like outside right now" sense. "weather in <place> today"
+    # is spelled out because it slipped past `today('s)? weather` and reached
+    # the LLM, which saw "Houston" -- also a school alias -- and chose hybrid.
     r"\b(weather forecast|today('s)? weather|temperature outside|"
+    r"what('s| is) the weather|weather (in|for) [a-z ]{2,20}(today|tomorrow|right now)|"
     r"recipe for|how to cook|cooking (tip|hack)|"
     r"tell me a joke|write me a (poem|story|song)|generate (code|an? essay)|"
     r"(nfl|nba|mlb|nhl|fifa) (score|game|match|player|team)|"
@@ -405,9 +411,19 @@ Classify the question into exactly one category:
            requires searching meeting transcripts. Use RAG for ANY topic that could appear
            in a college board meeting — technology, AI, cloud, innovation, programs, etc.
   HYBRID – Needs BOTH structured records AND transcript search for a complete answer.
-  NONE   – ONLY for things that absolutely cannot appear in any board meeting:
-           weather, sports scores, celebrity gossip, cooking recipes, personal greetings.
-           Do NOT use NONE for education or technology topics — search the transcripts first.
+  NONE   – The question does not depend on anything anyone said at a board meeting.
+           The test: would the answer be exactly the same if these transcripts had
+           never existed? If yes, it is NONE. That covers general knowledge and
+           trivia (capital cities, historical dates, arithmetic, definitions),
+           news and events unrelated to the college, weather, sports, celebrity
+           gossip, recipes, requests to write code or fiction, and greetings or
+           small talk.
+
+           Do NOT use NONE just because a topic sounds unfamiliar, technical or
+           specific. Education, technology, AI, budgets, contracts, facilities,
+           personnel, accreditation and community topics all belong in a board
+           meeting — search the transcripts first. If you are genuinely torn
+           between NONE and RAG, choose RAG.
 
 Question: {query}
 

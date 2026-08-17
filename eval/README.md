@@ -1,166 +1,114 @@
-# Neo v2 — Eval Set
+# Eval set
 
-Slim version of Phase 14: a hand-curated set of trustee questions with
-checkable expectations, plus a lightweight per-query trace log. The goal is
-to answer **"did my prompt change make this better or worse?"** without
-yet adopting Phoenix or full OpenTelemetry.
+33 cases in `eval_set.jsonl`, run by `tests/test_eval.py` against a live `/ask`.
+This is implementation-plan **P2-0**, which the plan scheduled for the pilot's
+first week and which turned out to be a prerequisite for judging anything —
+see "Why this was rewritten" below.
 
-When the project later hits a debugging question we *can't* answer with
-this setup ("why did this single query retrieve the wrong chunks?"), swap
-`observability/query_log.py` for an OTel exporter — the call site doesn't
-change.
-
----
-
-## Files
-
-| Path | What |
-|---|---|
-| `eval/eval_set.jsonl` | One JSON object per line — the test cases |
-| `tests/test_eval.py`  | Runner — works as a CLI script *and* as pytest |
-| `observability/query_log.py` | Per-query JSONL writer wired into `/ask` |
-| `data/query_log.jsonl` | Auto-generated trace log (gitignored, real queries land here) |
-
----
-
-## Running the eval
-
-The backend (`uvicorn`) and Qdrant (Docker) must both be up — RAG and
-hybrid cases need vector search. Start them per the dev README, then:
-
-```powershell
-# Clean tabular output, easier to skim while iterating
-uv run python tests/test_eval.py
+```bash
+# clean tabular output
+API_URL=http://localhost:8000 uv run python tests/test_eval.py
 uv run python tests/test_eval.py --verbose
-uv run python tests/test_eval.py --filter ask-001
+uv run python tests/test_eval.py --filter ask-016
 
-# CI-friendly: one pytest test per case so failures isolate cleanly
+# one pytest per case
 uv run pytest tests/test_eval.py -v
 ```
 
-Point at a different backend with `API_URL`:
+## Coverage
 
-```powershell
-$env:API_URL = "http://staging.neo.local:8000"; uv run python tests/test_eval.py
-```
+| route kind | cases | schools |
+|---|---|---|
+| sql | 8 | all 8, one each |
+| rag | 9 | all 8 |
+| hybrid | 4 | HCC, Central Texas, El Paso, Alamo |
+| latest_meeting | 6 | HCC ×2, El Paso, Dallas, Lone Star, Mt. SAC |
+| compare | 3 | cross-college |
+| adversarial | 3 | n/a |
 
----
+Every anchor was read out of the live database on 2026-08-16 —
+`financial_items`, `initiatives`, `personnel_actions`, `votes`. No invented
+figures. `expected_chunk_ids` come from those rows' own `chunk_ids` provenance
+column, so they are ground truth about which chunk supports the claim.
 
-## Case schema
+## Baseline (2026-08-16, gemini-3.5-flash, torch reranker)
 
-Each line in `eval_set.jsonl` is one JSON object:
+**31/33.** The measured run showed 30/33; ask-021 failed on a transient
+`HTTP 503: Neo's AI provider is unavailable`, not on anything in the case.
 
-```json
-{
-  "id":               "ask-001",
-  "route_kind":       "sql",
-  "question":         "How much did HCC approve for the FY 2025-26 operating budget?",
-  "school_slug":      null,
-  "expected_route":   "sql",
-  "must_contain_any": ["481", "$481", "481 million"],
-  "must_not_contain": ["i don't have", "no data", "cannot find"],
-  "expected_school_slug":  null,
-  "expected_meeting_ids":  [],
-  "notes": "Anchored on HCC FY2025-26 unrestricted operating budget $481M."
-}
-```
+| route kind | |
+|---|---|
+| sql | 8/8 |
+| rag | 8/9 (the 503) |
+| hybrid | 4/4 |
+| latest_meeting | 6/6 |
+| compare | 3/3 |
+| **adversarial** | **1/3 — a real defect, see below** |
 
-Fields:
+Expected-chunk recall: **75%** mean. Seven rag cases carry chunk ids; six were
+scored in that run, since ask-021 hit the 503 before it could be measured.
 
-- **id** — stable identifier; appears in pytest output.
-- **route_kind** — informational tag (`sql`, `rag`, `hybrid`, `compare`,
-  `latest_meeting`, `adversarial`). Not asserted.
-- **question** — the trustee-style query sent to `/ask`.
-- **school_slug** — *input* school filter (sent to `/ask` as `school_slug`
-  param). Use when the question doesn't name the college explicitly.
-- **expected_route** — the router must produce this. Use `"any"` to skip.
-- **must_contain_any** — answer (lowercased) must contain at least *one*
-  of these substrings. Use generous synonyms (`"481"`, `"$481"`,
-  `"481 million"`) so paraphrase doesn't break the assertion.
-- **must_not_contain** — answer must contain *none* of these. Best for
-  catching refusal phrases ("I don't have data") leaking into answers
-  that should have data.
-- **expected_school_slug** — for `latest_meeting` route, the resolved
-  meeting must belong to this school.
-- **expected_meeting_ids** — at least one of these IDs must appear either
-  as `meeting_id` (latest_meeting) or in any citation. Use when you have
-  a stable ground-truth meeting; leave empty otherwise.
-- **notes** — free-form. Why this case exists, what it's anchored on.
+### Read the recall number as a trend, not a target
 
----
+75% is the baseline, and 100% is not the goal. The extractors' provenance often
+lists two *overlapping* chunks for one claim, and retrieval reliably surfaces
+one of the pair — ask-018, ask-019 and ask-020 each sit at 50% for exactly that
+reason, with the retrieved chunk being a perfectly good source.
 
-## Writing good cases
+Scoring the fraction (rather than "any expected chunk hit") is deliberate: it
+keeps the metric sensitive. A reranker or chunking change that starts dropping
+one chunk of a pair moves 75% down visibly, where an any-hit metric would stay
+at a comfortable 100% until the last chunk went too.
 
-1. **Anchor on stable facts.** Use SQL the DB will reliably return —
-   large round numbers, distinctive vendor names, the most-recent
-   meeting. Avoid phrasing the question to depend on text that appears
-   in only one chunk.
-2. **Generous keyword sets.** The LLM paraphrases. `"$481M"` won't
-   match `"481 million"`. Include both.
-3. **Use `must_not_contain` for the refusal trap.** When a query *should*
-   have an answer, banning `"I don't have"` catches the regression
-   where the model bails out instead of citing the data.
-4. **One assertion at a time when expanding.** Add a case, run it, fix
-   anything that fails, *then* add the next. A growing red bar of vague
-   failures is worse than a smaller green one.
-5. **Mark adversarial cases clearly.** Off-topic / out-of-scope queries
-   should set `expected_route` to `"none"` and assert refusal phrases.
+## The one standing defect
 
----
+`ask-005` ("What's the weather in Houston today?") and `ask-033` ("What is the
+capital of France?") both route to `hybrid` and **improvise an answer** instead
+of refusing — ask-033 literally returns "Paris". `ask-032` (a cat poem) is
+refused correctly, so the guard fires sometimes.
 
-## Per-query trace log
+These are kept strict on purpose. Relaxing their expected route would make the
+suite green and hide a real hole in the off-topic guard that `rag/answer.py`'s
+`route == "none"` branch is supposed to close.
 
-Every `/ask` call writes one JSONL line to `data/query_log.jsonl`:
+## Why this was rewritten
 
-```json
-{
-  "ts": "2026-04-29T18:42:00+00:00",
-  "query": "How much did HCC approve for the operating budget?",
-  "school_slug": null,
-  "route": "sql",
-  "elapsed_sec": 12.4,
-  "answer_chars": 320,
-  "answer_preview": "The fiscal year 2025-26 operating budget for HCC was approved at $481 million...",
-  "meeting_id": null,
-  "citations": [{"type": "sql", "meeting_id": 34, "score": null, "title": "..."}],
-  "n_citations": 3
-}
-```
+The previous 9-case set could not measure a retrieval change. Run twice against
+an **unchanged** container it scored 5/9 then 6/9, flipping on ask-002: the
+router LLM is nondeterministic and its noise was as large as any effect worth
+measuring. Three concrete faults, all now fixed:
 
-This is enough to answer iteration questions without Phoenix:
+1. **A stale anchor.** `ask-009` expected "84" for El Paso's refunding bonds.
+   The evidence-provenance re-extraction moved that figure to **$103,910,000**,
+   so the case could never pass again.
+2. **Case-sensitive keywords.** The harness lowercases the answer but did not
+   lowercase `must_contain_any`, so `ask-003`'s `"Aviation"` was unmatchable.
+   Keywords are now lowercased on load.
+3. **Over-pinned routes.** "Summarize the last 2 meetings" is defensibly `rag`,
+   `hybrid` or `latest_meeting`. `expected_route` now accepts a list, so the
+   suite scores the answer rather than the coin toss.
 
-- "Which queries are slow?" → sort by `elapsed_sec`.
-- "Which routes are getting picked?" → group by `route`.
-- "Was retrieval involved?" → `n_citations > 0`.
-- "Which meetings show up most in citations?" → flatten `citations[].meeting_id`.
+Two further faults were in the *first draft of this expansion*, caught by
+running it:
 
-Disable the writer with `NEO_QUERY_LOG=off`. Override the path with
-`NEO_QUERY_LOG_PATH=/some/other/file.jsonl` (used by tests).
+4. **`expected_meeting_ids` is unsatisfiable on sql/hybrid cases.** SQL
+   citations carry no `meeting_id` (`api/schemas/ask.py` documents the field as
+   RAG-only). The draft failed all 8 sql cases on it while every answer held
+   the correct figure.
+5. **`expected_chunk_ids` on a hybrid case measures routing, not retrieval.** A
+   hybrid answer may legitimately cite SQL rows and no chunks, which reads as 0%
+   recall when nothing about retrieval changed. The metric is now rag-only.
 
----
+## Regenerating
 
-## Migrating to Phoenix later
+`eval_set.jsonl` is generated, so the anchors can be re-derived when the corpus
+changes rather than drifting silently as they did before. The generator carries
+the provenance queries and the reasoning behind each structural rule.
 
-When the iteration question becomes *"on this single query, why did the
-reranker pick chunk X over chunk Y?"* — that's the signal to upgrade.
-The migration is one file:
+## What this set still cannot do
 
-1. Install Arize Phoenix locally.
-2. Replace `observability/query_log.py` with an OTel span exporter.
-3. Keep the same field names (`route`, `elapsed_sec`, `n_citations`,
-   etc.) as span attributes — the historical JSONL log still parses.
-
-The `/ask` service code (`api/services/ask_service.py`) does not change.
-
----
-
-## What this slim setup deliberately does *not* do
-
-- ❌ Phoenix UI / Arize dashboard
-- ❌ Full OpenTelemetry instrumentation across the pipeline
-- ❌ Automated weekly eval runs (run it manually after prompt changes)
-- ❌ Reranker-score visualization
-- ❌ Answer-grounding scoring (citation precision/recall)
-
-These are real Phase 14 deliverables, but the 80/20 is the eval set + the
-trace log. Add them when an actual question forces the upgrade.
+Only 7 of the 33 cases carry `expected_chunk_ids`, so retrieval quality rests on
+a narrow base. Before switching the reranker default (`RERANKER_BACKEND=onnx`)
+or lowering `RETRIEVAL_TOP_K`, add chunk expectations to more rag cases — those
+two changes are precisely the ones this metric exists to judge, and 7 cases is
+thin ground to judge them on.

@@ -1,2 +1,13 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# These files are consumed by Linux containers. Git on Windows would otherwise
+# check them out with CRLF, which breaks things silently and confusingly:
+# the Dockerfile's `<<'PY'` heredoc terminator stops matching, and shell
+# scripts fail with "\r: command not found".
+Dockerfile          text eol=lf
+*.Dockerfile        text eol=lf
+.dockerignore       text eol=lf
+docker-compose.yml  text eol=lf
+deploy/Caddyfile    text eol=lf
+*.sh                text eol=lf
