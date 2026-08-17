@@ -1,3 +1,6 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
 # These files are consumed by Linux containers. Git on Windows would otherwise
 # check them out with CRLF, which breaks things silently and confusingly:
 # the Dockerfile's `<<'PY'` heredoc terminator stops matching, and shell
