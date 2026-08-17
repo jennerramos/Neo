@@ -22,7 +22,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from rag.query_router import _pattern_route  # noqa: E402
+from rag.query_router import _extract_schools, _pattern_route  # noqa: E402
 
 
 # ── Off-topic: must be caught by pattern alone, without reaching the LLM ────
@@ -84,6 +84,89 @@ def test_on_topic_is_not_blocked(query: str) -> None:
             f"{query!r} was hard-blocked as off-topic; the transcripts may well "
             f"answer it"
         )
+
+
+# ── Comparison routing ─────────────────────────────────────────────────────
+#
+# Two failure modes lived here. The pattern list covered "compared to" and
+# "how does X compare" but not the bare imperative, and its cross-school clause
+# was a hardcoded (hcc|houston community) x (lone star|lsc|san jac) pair list
+# that could never fire for the six other colleges. Both are covered below;
+# the second is why the "no HCC in sight" cases matter.
+COMPARE = [
+    "Compare the bond programs at Alamo Colleges and Dallas College.",
+    "Compare Austin Community College and Mt. SAC.",
+    "How does HCC's operating budget compare to El Paso's?",
+    "What's the difference between Alamo Colleges and Central Texas College?",
+    "Which colleges have invested in workforce development programs?",
+    "How do enrollment trends vary across colleges?",
+    # No comparison word at all — two colleges named is the signal.
+    "What did Dallas College and Lone Star College approve for facilities?",
+]
+
+
+@pytest.mark.parametrize("query", COMPARE)
+def test_comparison_queries_route_to_compare(query: str) -> None:
+    decision = _pattern_route(query)
+    assert decision is not None, f"pattern layer let {query!r} through to the LLM"
+    assert decision["route"] == "compare", f"{query!r} routed to {decision['route']!r}"
+
+
+SINGLE_SCHOOL = [
+    "How much did HCC approve for the operating budget?",
+    "What happened at Mt. SAC's last board meeting?",
+    "What did trustees say about the Dallas College innovation center?",
+]
+
+
+@pytest.mark.parametrize("query", SINGLE_SCHOOL)
+def test_single_school_questions_are_not_comparisons(query: str) -> None:
+    """One college named is not a comparison, however the sentence is phrased.
+
+    Guards the >= 2 rule from being loosened to >= 1, which would send every
+    ordinary question down the cross-school fan-out.
+    """
+    decision = _pattern_route(query)
+    if decision is not None:
+        assert decision["route"] != "compare", (
+            f"{query!r} routed to compare with one college named"
+        )
+
+
+# ── School extraction ──────────────────────────────────────────────────────
+#
+# Alamo, Dallas and Austin CC were seeded with the Panopto/Ravnur adapters but
+# never added to _SCHOOL_ALIASES, so questions naming them extracted no school
+# and were answered across all eight colleges. Every seeded slug is asserted
+# here so the next college added fails this test rather than degrading quietly.
+ALL_SLUGS = {
+    "houston_city_college":     "How much did HCC approve for the budget?",
+    "lone_star_college":        "What did Lone Star College decide?",
+    "el_paso_community_college": "Summarize the last El Paso meeting.",
+    "central_texas_college":    "What did Central Texas College approve?",
+    "mt_san_antonio_college":   "What happened at Mt. SAC's last meeting?",
+    "alamo_colleges":           "What did Alamo Colleges approve?",
+    "dallas_college":           "What did Dallas College approve?",
+    "austin_community_college": "What did Austin Community College approve?",
+}
+
+
+@pytest.mark.parametrize("slug,query", sorted(ALL_SLUGS.items()))
+def test_every_seeded_college_is_recognised(slug: str, query: str) -> None:
+    assert _extract_schools(query) == [slug]
+
+
+def test_schools_come_back_in_first_mention_order() -> None:
+    """answer.py uses schools[0] as the fallback filter, so order is meaning.
+
+    _SCHOOL_PATTERNS is sorted by alias length, which is not query order.
+    """
+    assert _extract_schools("Dallas College and Lone Star College") == [
+        "dallas_college", "lone_star_college",
+    ]
+    assert _extract_schools("Compare HCC and El Paso") == [
+        "houston_city_college", "el_paso_community_college",
+    ]
 
 
 # ── Cases the pattern layer cannot decide ──────────────────────────────────
