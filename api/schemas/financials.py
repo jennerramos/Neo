@@ -21,6 +21,10 @@ class FinancialRow(BaseModel):
     description:    Optional[str] = None
     confidence:     float = 0.0
 
+    # Source-chunk provenance (migration 0006) — see VoteRow for the rationale.
+    # Empty for legacy rows extracted before v2.6.
+    chunk_ids:      List[str] = []
+
     # Twin of database.models.FinancialItem — kept ORM-validatable for
     # consistency with MeetingRow / VoteRow. See refactor_candidates.md #4.
     model_config = {"from_attributes": True}

@@ -122,6 +122,8 @@ export interface Vote {
   unanimous: boolean | null;
   moved_by: string | null;
   confidence: number;
+  /** Source chunks this row was extracted from. Empty for pre-v2.6 rows. */
+  chunk_ids: string[];
 }
 
 export interface VoteListResponse {
@@ -157,6 +159,8 @@ export interface Financial {
   amount: number | null;
   description: string | null;
   confidence: number;
+  /** Source chunks this row was extracted from. Empty for pre-v2.6 rows. */
+  chunk_ids: string[];
 }
 
 export interface FinancialListResponse {

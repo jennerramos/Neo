@@ -10,6 +10,7 @@ import {
 import type { School, Vote, VotesStats } from "@/types";
 import { cn, fmtDate } from "@/lib/utils";
 import Spinner from "@/components/ui/Spinner";
+import SourceLink from "@/components/ui/SourceLink";
 import EmptyState from "@/components/ui/EmptyState";
 import ErrorState from "@/components/ui/ErrorState";
 import FilterBar, { FilterSelect } from "@/components/ui/FilterBar";
@@ -220,7 +221,10 @@ export default function VotesPage() {
                   </td>
                   <td className="table-cell max-w-xs">
                     <p className="line-clamp-2 text-sm text-slate-800">{v.motion_text ?? "—"}</p>
-                    {v.moved_by && <p className="mt-0.5 text-xs text-slate-400">Moved by {v.moved_by}</p>}
+                    <div className="mt-0.5 flex items-center gap-2">
+                      {v.moved_by && <span className="text-xs text-slate-400">Moved by {v.moved_by}</span>}
+                      <SourceLink meetingId={v.meeting_id} chunkIds={v.chunk_ids} />
+                    </div>
                   </td>
                   <td className="table-cell whitespace-nowrap text-slate-500">
                     <Link href={`/meetings/${v.meeting_id}`} className="hover:text-indigo-600 hover:underline">

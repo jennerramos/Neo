@@ -60,7 +60,9 @@ def list_financials(
             m.published_date,
             f.action_type, f.category, f.vendor,
             f.amount, f.description,
-            f.confidence
+            f.confidence,
+            -- Source-chunk provenance (migration 0006) — see votes.py.
+            f.chunk_ids
         FROM financial_items f
         JOIN meetings m ON m.meeting_id = f.meeting_id
         JOIN schools s ON s.school_id = m.school_id

@@ -11,6 +11,7 @@ import {
 import type { Financial, FinancialsStats, School } from "@/types";
 import { cn, fmtCurrency, fmtDate } from "@/lib/utils";
 import Spinner from "@/components/ui/Spinner";
+import SourceLink from "@/components/ui/SourceLink";
 import EmptyState from "@/components/ui/EmptyState";
 import ErrorState from "@/components/ui/ErrorState";
 import FilterBar, { FilterSelect } from "@/components/ui/FilterBar";
@@ -235,7 +236,10 @@ export default function FinancialsPage() {
                   </td>
                   <td className="table-cell max-w-xs">
                     <p className="line-clamp-2 text-sm text-slate-800">{f.description ?? "—"}</p>
-                    {f.vendor && <p className="mt-0.5 text-xs text-slate-400">{f.vendor}</p>}
+                    <div className="mt-0.5 flex items-center gap-2">
+                      {f.vendor && <span className="text-xs text-slate-400">{f.vendor}</span>}
+                      <SourceLink meetingId={f.meeting_id} chunkIds={f.chunk_ids} />
+                    </div>
                   </td>
                   <td className="table-cell text-xs text-slate-500">{f.category ?? "—"}</td>
                   <td className="table-cell font-semibold text-slate-900">{fmtCurrency(f.amount)}</td>

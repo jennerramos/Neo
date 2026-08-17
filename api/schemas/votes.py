@@ -24,6 +24,13 @@ class VoteRow(BaseModel):
     moved_by:         Optional[str] = None
     confidence:       float = 0.0
 
+    # Source-chunk provenance (migration 0006). Stored on every extracted row
+    # since the provenance rollout but never exposed, so a trustee could read
+    # "the board approved X" with no way to reach the words behind it. The
+    # frontend links the first id into the transcript at #chunk-<id>.
+    # Empty for legacy rows extracted before v2.6.
+    chunk_ids:        List[str] = []
+
     # Twin of database.models.Vote — kept ORM-validatable for consistency
     # with MeetingRow / FinancialRow. See refactor_candidates.md #4.
     model_config = {"from_attributes": True}

@@ -49,7 +49,11 @@ def list_votes(
             v.motion_text, v.vote_result_text,
             v.yes_count, v.no_count, v.abstain_count,
             v.passed, v.unanimous, v.moved_by,
-            v.confidence
+            v.confidence,
+            -- Source-chunk provenance (migration 0006). Carried through so the
+            -- UI can link a row back to the words it was extracted from, the
+            -- same deep link an /ask citation uses.
+            v.chunk_ids
         FROM votes v
         JOIN meetings m ON m.meeting_id = v.meeting_id
         JOIN schools s ON s.school_id = m.school_id
