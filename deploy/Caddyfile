@@ -1,0 +1,99 @@
+# Neo v2 — Caddy front door (implementation plan P1-3, and P0-2's auth).
+#
+# Requires Caddy >= 2.8 (`basic_auth`; it was spelled `basicauth` before).
+# The caddy:2-alpine tag in docker-compose.yml is well past that.
+#
+# Routing contract, which the frontend depends on (see frontend/src/lib/api.ts):
+#
+#   /api/health   → api:8000/health   public, so uptime checks work (P3-14)
+#   /api/*        → api:8000/*        authenticated, prefix stripped
+#   everything    → web:3000          authenticated
+#
+# Because the browser's API base is the relative "/api", every call the client
+# makes is same-origin. CORS never enters the picture; NEO_CORS_ORIGINS is
+# belt-and-braces for anything hitting the API on another hostname.
+{
+	# Let's Encrypt sends expiry warnings here.
+	email {$NEO_ACME_EMAIL}
+}
+
+# P0-2. HTTP Basic at the edge, per the plan's zero-code alternative: five
+# lines instead of ~100 LoC of JWT plumbing, and it covers the CSV exporters
+# (/api/export/*.csv) which otherwise hand 5000 rows to any caller.
+#
+# The trade-off the plan names: no per-user attribution in
+# observability/query_log.py. With five pilot users that is acceptable; revisit
+# if the pilot grows or the logs need to answer "who asked this?".
+#
+# Generate the hash with:  docker run --rm caddy:2-alpine caddy hash-password
+(neo_auth) {
+	basic_auth {
+		{$NEO_BASIC_AUTH_USER} {$NEO_BASIC_AUTH_HASH}
+	}
+}
+
+{$NEO_DOMAIN} {
+	log {
+		output stdout
+		format console
+	}
+
+	encode zstd gzip {
+		# Explicit allow-list rather than the default, so that text/event-stream
+		# is never compressed. The encoder buffers, and a buffered SSE response
+		# is not a stream — /ask?stream=true would sit silent and then dump the
+		# whole answer at once, undoing P0-1.
+		match {
+			header Content-Type text/html*
+			header Content-Type text/css*
+			header Content-Type text/plain*
+			header Content-Type application/json*
+			header Content-Type application/javascript*
+			header Content-Type image/svg+xml*
+		}
+	}
+
+	# ── Health: the one unauthenticated route ────────────────────────────────
+	# Listed first; Caddy resolves overlapping `handle` blocks by matcher
+	# specificity, and this is more specific than /api/* below.
+	handle /api/health {
+		uri strip_prefix /api
+		reverse_proxy api:8000
+	}
+
+	# ── API ──────────────────────────────────────────────────────────────────
+	handle /api/* {
+		import neo_auth
+		uri strip_prefix /api
+
+		reverse_proxy api:8000 {
+			# flush_interval -1 disables response buffering. Without it Caddy
+			# holds SSE frames until its buffer fills; token-by-token streaming
+			# silently degrades into one late blob.
+			flush_interval -1
+
+			# Non-streaming /ask sends no headers until generation finishes —
+			# up to LLM_READ_TIMEOUT (120 s default). Caddy's default here
+			# would give up first. Deliberately only a header timeout: capping
+			# body reads would put a ceiling on how long an SSE stream may run.
+			transport http {
+				response_header_timeout 180s
+			}
+		}
+	}
+
+	# ── Frontend ─────────────────────────────────────────────────────────────
+	handle {
+		import neo_auth
+		reverse_proxy web:3000
+	}
+
+	header {
+		# Sent on plain HTTP too if someone downgrades; harmless there.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		X-Frame-Options "SAMEORIGIN"
+		-Server
+	}
+}

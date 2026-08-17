@@ -1,0 +1,131 @@
+# Neo v2 — pilot stack (implementation plan P1-3).
+#
+#   caddy → web (Next.js)          everything except /api/*
+#   caddy → api (FastAPI)          /api/*  (prefix stripped)
+#   api   → postgres, qdrant       private, not published to the host
+#
+# ALWAYS run this with an explicit env file:
+#
+#     docker compose --env-file deploy/.env.deploy up -d --build
+#
+# Without --env-file, compose auto-loads ./.env — which in this repo is the
+# *workstation* config (DATABASE_URL=localhost, GPU paths, pipeline keys). That
+# would silently interpolate the wrong values here. deploy/.env.deploy is the
+# only file this stack should ever read.
+
+name: neo
+
+services:
+  # ── Reverse proxy + TLS + the pilot's front door ──────────────────────────
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"   # HTTP/3
+    env_file:
+      # Defaults to the VPS file. The local rehearsal points this at
+      # deploy/.env.local instead (that file sets NEO_ENV_FILE to itself), so
+      # the two configs never overwrite each other. See deploy/README.md.
+      - ${NEO_ENV_FILE:-./deploy/.env.deploy}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data       # ACME account + issued certs — do not lose this
+      - caddy_config:/config
+    depends_on:
+      - web
+      - api
+
+  # ── Next.js frontend ──────────────────────────────────────────────────────
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      # SSR/RSC calls go straight to the API over the Docker network: no TLS
+      # hop, no Basic-auth prompt, no dependency on public DNS resolving from
+      # inside the box. Browser calls take the Caddy path instead (see
+      # frontend/Dockerfile for why the two differ).
+      NEO_API_TARGET: http://api:8000
+    depends_on:
+      api:
+        condition: service_started
+    expose:
+      - "3000"
+
+  # ── FastAPI backend ───────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      # Defaults to the VPS file. The local rehearsal points this at
+      # deploy/.env.local instead (that file sets NEO_ENV_FILE to itself), so
+      # the two configs never overwrite each other. See deploy/README.md.
+      - ${NEO_ENV_FILE:-./deploy/.env.deploy}
+    environment:
+      # These three are set here rather than in the env file because they are
+      # topology, not configuration — inside the network the hostnames are
+      # always these, whatever the operator's file says. `environment` wins
+      # over `env_file`, so a stale localhost DATABASE_URL cannot leak in.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-neo}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env.deploy}@postgres:5432/${POSTGRES_DB:-neo_v2}
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: "6333"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    volumes:
+      # observability/query_log.py appends here. Keeping it on a volume means
+      # the query log survives `docker compose down`.
+      - api_data:/app/data
+    expose:
+      - "8000"
+
+  # ── Postgres ──────────────────────────────────────────────────────────────
+  postgres:
+    # Pin this to the major version your workstation runs before the first
+    # pg_dump restore (P1-4) — dumps do not cross major versions cleanly.
+    image: postgres:${POSTGRES_IMAGE_TAG:-16-alpine}
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-neo_v2}
+      POSTGRES_USER: ${POSTGRES_USER:-neo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env.deploy}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-neo} -d ${POSTGRES_DB:-neo_v2}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    # P1-5 (workstation → VPS pipeline runs): expose over WireGuard only, never
+    # on the public interface. Substitute the VPS's wg0 address.
+    # ports:
+    #   - "10.8.0.1:5432:5432"
+
+  # ── Qdrant ────────────────────────────────────────────────────────────────
+  qdrant:
+    # Set QDRANT_IMAGE_TAG to match the workstation's Qdrant before restoring a
+    # snapshot (P1-4) — snapshot format is version-sensitive.
+    image: qdrant/qdrant:${QDRANT_IMAGE_TAG:-latest}
+    restart: unless-stopped
+    volumes:
+      - qdrant_data:/qdrant/storage
+    # No healthcheck: the qdrant image ships no curl, and a check that can't
+    # run would block `api` forever behind service_healthy. The API only talks
+    # to Qdrant on the first /ask, by which point it is long up.
+    # ports:
+    #   - "10.8.0.1:6333:6333"   # P1-5, same reasoning as postgres above
+
+volumes:
+  postgres_data:
+  qdrant_data:
+  api_data:
+  caddy_data:
+  caddy_config:
