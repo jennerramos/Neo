@@ -10,11 +10,20 @@ checks three things per case:
      (case-insensitive).
   3. The answer contains none of the strings in must_not_contain.
 
+``expected_route`` may be a single route, a list of acceptable routes, or
+"any". Several questions are defensibly more than one route, and scoring those
+against a single answer measures router nondeterminism rather than quality.
+
 Plus optional assertions:
   - expected_school_slug — for latest_meeting route, the AskResponse
     must resolve to that school.
   - expected_meeting_ids — at least one of these IDs must show up in
     citations or in the resolved meeting_id field.
+  - expected_chunk_ids — the chunks that actually carry the evidence, taken
+    from the extractors' `chunk_ids` provenance column. Reported as a recall
+    percentage rather than asserted: it is the number to watch when changing
+    anything upstream of the LLM (reranker, chunking, embeddings), because it
+    moves independently of how the model happened to phrase the answer.
 
 Usage:
     # Run as a standalone script (clean output, easier to iterate on):
@@ -60,26 +69,45 @@ class EvalCase:
     id: str
     question: str
     route_kind: str
-    expected_route: str | None
+    expected_routes: list[str]
     must_contain_any: list[str]
     must_not_contain: list[str]
     school_slug: str | None
     expected_school_slug: str | None
     expected_meeting_ids: list[int]
+    expected_chunk_ids: list[str]
     notes: str
 
     @classmethod
     def from_json(cls, row: dict[str, Any]) -> "EvalCase":
+        # expected_route accepts a string or a list. Several questions are
+        # defensibly more than one route -- "summarize the last 2 meetings" is
+        # reasonably rag, hybrid or latest_meeting -- and pinning those to a
+        # single answer made the suite fail on router nondeterminism rather
+        # than on anything about answer quality. "any" means don't check.
+        raw = row.get("expected_route")
+        if raw is None or raw == "any":
+            routes: list[str] = []
+        elif isinstance(raw, str):
+            routes = [raw]
+        else:
+            routes = list(raw)
+
         return cls(
             id=row["id"],
             question=row["question"],
             route_kind=row.get("route_kind", "unknown"),
-            expected_route=row.get("expected_route"),
+            expected_routes=routes,
+            # Keywords are lowercased here because they are matched against a
+            # lowercased answer. Without this a capitalised keyword in the
+            # JSONL can never match, and the case fails forever for a reason
+            # that looks like a model problem.
             must_contain_any=[s.lower() for s in row.get("must_contain_any", [])],
             must_not_contain=[s.lower() for s in row.get("must_not_contain", [])],
             school_slug=row.get("school_slug"),
             expected_school_slug=row.get("expected_school_slug"),
-            expected_meeting_ids=row.get("expected_meeting_ids", []),
+            expected_meeting_ids=row.get("expected_meeting_ids") or [],
+            expected_chunk_ids=row.get("expected_chunk_ids") or [],
             notes=row.get("notes", ""),
         )
 
@@ -105,6 +133,9 @@ class CaseResult:
     failures: list[str]
     response: dict[str, Any] | None
     elapsed_s: float
+    # Fraction of the case's expected_chunk_ids that appeared in citations.
+    # None when the case declares none.
+    chunk_recall: float | None = None
 
 
 def run_case(case: EvalCase) -> CaseResult:
@@ -134,12 +165,10 @@ def run_case(case: EvalCase) -> CaseResult:
     answer = (response.get("answer") or "").lower()
     route = response.get("route") or ""
 
-    # 1. Route check
-    if case.expected_route and case.expected_route != "any":
-        if route != case.expected_route:
-            failures.append(
-                f"route mismatch: expected '{case.expected_route}', got '{route}'"
-            )
+    # 1. Route check — any of the accepted routes will do
+    if case.expected_routes and route not in case.expected_routes:
+        expected = " | ".join(case.expected_routes)
+        failures.append(f"route mismatch: expected '{expected}', got '{route}'")
 
     # 2. must_contain_any — at least one keyword present
     if case.must_contain_any:
@@ -178,7 +207,23 @@ def run_case(case: EvalCase) -> CaseResult:
                 f"appeared in citations or resolved meeting (saw {sorted(seen_ids)})"
             )
 
-    return CaseResult(case, not failures, failures, response, elapsed)
+    # 6. Optional: retrieval precision. expected_chunk_ids are the chunks that
+    # actually carry the evidence — taken from the extractor's own `chunk_ids`
+    # provenance column, so this is ground truth about which chunk supports the
+    # claim, not a guess.
+    #
+    # Recorded rather than asserted. Retrieval quality is a trend to watch
+    # across a change (a new reranker, new chunking, task prefixes), and a
+    # single case dropping one expected chunk is not by itself a defect worth
+    # failing a build over. The suite summary reports the aggregate.
+    recall = None
+    if case.expected_chunk_ids:
+        got = [c.get("chunk_id") for c in (response.get("citations") or [])]
+        got_set = {g for g in got if g}
+        hit = set(case.expected_chunk_ids) & got_set
+        recall = len(hit) / len(case.expected_chunk_ids)
+
+    return CaseResult(case, not failures, failures, response, elapsed, recall)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -219,7 +264,8 @@ def _cli(argv: list[str]) -> int:
         result = run_case(case)
         results.append(result)
         flag = "PASS" if result.ok else "FAIL"
-        print(f"  [{flag}] {case.id:<10} {case.route_kind:<14} {case.question[:60]}")
+        rec = "" if result.chunk_recall is None else f"  chunks {result.chunk_recall:.0%}"
+        print(f"  [{flag}] {case.id:<10} {case.route_kind:<14} {case.question[:56]}{rec}")
         if not result.ok or verbose:
             for f in result.failures:
                 print(f"           ! {f}")
@@ -232,6 +278,31 @@ def _cli(argv: list[str]) -> int:
     passed = sum(1 for r in results if r.ok)
     failed = len(results) - passed
     print(f"\n{passed} passed, {failed} failed")
+
+    # Per-route-kind breakdown: an aggregate score hides which part regressed.
+    kinds: dict[str, list[bool]] = {}
+    for r in results:
+        kinds.setdefault(r.case.route_kind, []).append(r.ok)
+    print("\nby route kind:")
+    for kind in sorted(kinds):
+        oks = kinds[kind]
+        print(f"  {kind:<15} {sum(oks)}/{len(oks)}")
+
+    # Retrieval recall, reported separately from answer correctness. This is
+    # the number to watch when changing anything upstream of the LLM — the
+    # reranker, chunking, embeddings — because it moves independently of
+    # whether the model phrased the answer the way a keyword list expects.
+    scored = [r for r in results if r.chunk_recall is not None]
+    if scored:
+        mean = sum(r.chunk_recall for r in scored) / len(scored)
+        full = sum(1 for r in scored if r.chunk_recall == 1.0)
+        none_ = sum(1 for r in scored if r.chunk_recall == 0.0)
+        print(f"\nexpected-chunk recall over {len(scored)} cases: "
+              f"mean {mean:.0%}  (all {full}, none {none_})")
+        for r in scored:
+            if r.chunk_recall < 1.0:
+                print(f"  {r.case.id:<10} {r.chunk_recall:.0%}  {r.case.expected_chunk_ids}")
+
     return 0 if failed == 0 else 1
 
 
