@@ -124,6 +124,30 @@ _SCHOOL_ALIASES: dict[str, list[str]] = {
         "mt sac",
         "mt. sac",
     ],
+    # The three below were seeded with the Panopto and Ravnur caption adapters
+    # but never added here, so until 2026-08-16 a question naming any of them
+    # extracted NO school. That is not only a comparison problem: sql, rag and
+    # hybrid all use this to attach a school filter when the request omits
+    # school_slug, so "what did Dallas College approve" was silently answered
+    # across all eight colleges.
+    "alamo_colleges": [
+        "alamo colleges",
+        "alamo college",
+        "alamo",
+    ],
+    "dallas_college": [
+        "dallas college",
+        "dallas county community college",
+        "dallas",
+    ],
+    "austin_community_college": [
+        "austin community college",
+        "austin cc",
+        "acc",
+        # Deliberately not bare "austin": it is the city, the state capital and
+        # a common surname, and this corpus is full of Texas place names.
+        # "Austin College" is also a different, private college in Sherman TX.
+    ],
 }
 
 # Flatten to (compiled_pattern, slug) and sort by alias length DESC so
@@ -153,13 +177,21 @@ def _extract_schools(query: str) -> list[str]:
     first-mention so "compare HCC and El Paso" yields [hcc, epcc] rather
     than alphabetical.
     """
-    found: list[str] = []
+    # Collect with the match offset, because _SCHOOL_PATTERNS is ordered by
+    # alias LENGTH (so "houston community college" is tried before "hcc"), not
+    # by where the name appears. Appending in that order made the docstring's
+    # first-mention promise false -- "Dallas College and Lone Star College"
+    # came back [lone_star, dallas] -- and answer.py takes schools[0] as the
+    # fallback school filter, so the "primary" college was whichever happened
+    # to have the longer alias.
+    hits: dict[str, int] = {}
     for pattern, slug in _SCHOOL_PATTERNS:
-        if slug in found:
+        if slug in hits:
             continue
-        if pattern.search(query):
-            found.append(slug)
-    return found
+        m = pattern.search(query)
+        if m:
+            hits[slug] = m.start()
+    return sorted(hits, key=lambda slug: hits[slug])
 
 
 # ── Latest-meeting signals ────────────────────────────────────────────────────
@@ -187,13 +219,17 @@ _LATEST_COUNT_GUARD = re.compile(
 
 # ── Comparison signals ────────────────────────────────────────────────────────
 _COMPARE_PATTERNS = re.compile(
-    r"\b(better than|worse than|compared? to|vs\.?|versus|"
-    r"difference between|how does .{1,30} compare|which (college|school|institution) "
-    r"(is|has|does|did|was|were)|"
-    r"(more|less|higher|lower|greater|fewer) than .{1,20} (college|school|hcc|lone star|lsc)|"
-    r"across (schools|colleges|institutions|campuses)|"
-    r"(hcc|houston community) (and|vs|versus|or) (lone star|lsc|san jac)|"
-    r"(lone star|lsc) (and|vs|versus|or) (hcc|houston community))\b",
+    # The bare imperative comes first because it was the gap: only "compared
+    # to", "difference between" and "how does X compare" were covered, so
+    # "Compare the bond programs at Alamo Colleges and Dallas College" -- the
+    # most natural phrasing -- fell through to the LLM, which called it RAG.
+    r"\b(compare[ds]?|comparison|"
+    r"better than|worse than|vs\.?|versus|"
+    r"difference between|"
+    # Pluralised: "which colleges have ..." missed a singular-only pattern.
+    r"which (college|school|institution)s? (is|are|has|have|does|do|did|was|were)|"
+    r"(more|less|higher|lower|greater|fewer) than .{1,20} (college|school)|"
+    r"across (schools|colleges|institutions|campuses))\b",
     re.I,
 )
 
@@ -312,8 +348,19 @@ def _pattern_route(query: str) -> RouteDecision | None:
     # Blocking queries before search defeats the purpose of having indexed transcripts.
 
     # ── Comparison check — cross-school queries ──────────────────────────────
-    if _COMPARE_PATTERNS.search(q):
-        schools = _extract_schools(q)
+    #
+    # Naming two colleges in one question IS a comparison, whatever the
+    # phrasing, so that counts on its own. This replaces a hardcoded pair list
+    # -- (hcc|houston community) x (lone star|lsc|san jac) -- which could never
+    # fire for the six other colleges we now track, and which would have needed
+    # a new alternation for every pair on every school added. The same
+    # HCC-centric leftover that P2-1 cleaned out of the off-topic message.
+    #
+    # answer.py's compare branch fans out per slug and falls back to all
+    # schools on an empty list, so over-firing here degrades to a wider search
+    # rather than a wrong answer.
+    schools = _extract_schools(q)
+    if _COMPARE_PATTERNS.search(q) or len(schools) >= 2:
         return RouteDecision(
             route="compare",
             tables=_infer_tables(q),
@@ -331,7 +378,6 @@ def _pattern_route(query: str) -> RouteDecision | None:
     # multiple meetings.
     lm_match = _LATEST_MEETING_PATTERNS.search(q)
     if lm_match and not _LATEST_COUNT_GUARD.search(lm_match.group(0)):
-        schools = _extract_schools(q)
         return RouteDecision(
             route="latest_meeting",
             tables=_infer_tables(q),
@@ -341,9 +387,10 @@ def _pattern_route(query: str) -> RouteDecision | None:
         )
 
     # ── Mentioned schools (used by sql/rag/hybrid below) ─────────────────────
-    # Pulling this here so each route can attach it. answer.py uses
-    # decision["schools"][0] as a fallback when the request omits school_slug.
-    mentioned = _extract_schools(q)
+    # Extracted once above for the comparison check; reused here. answer.py
+    # uses decision["schools"][0] as a fallback when the request omits
+    # school_slug.
+    mentioned = schools
 
     # Hybrid check first — it overrides pure sql/rag
     if _HYBRID_PATTERNS.search(q):
@@ -411,23 +458,21 @@ Classify the question into exactly one category:
            requires searching meeting transcripts. Use RAG for ANY topic that could appear
            in a college board meeting — technology, AI, cloud, innovation, programs, etc.
   HYBRID – Needs BOTH structured records AND transcript search for a complete answer.
-  NONE   – The question does not depend on anything anyone said at a board meeting.
-           The test: would the answer be exactly the same if these transcripts had
-           never existed? If yes, it is NONE. That covers general knowledge and
-           trivia (capital cities, historical dates, arithmetic, definitions),
-           news and events unrelated to the college, weather, sports, celebrity
-           gossip, recipes, requests to write code or fiction, and greetings or
-           small talk.
-
-           Do NOT use NONE just because a topic sounds unfamiliar, technical or
-           specific. Education, technology, AI, budgets, contracts, facilities,
-           personnel, accreditation and community topics all belong in a board
-           meeting — search the transcripts first. If you are genuinely torn
-           between NONE and RAG, choose RAG.
+  NONE   – ONLY for things that absolutely cannot appear in any board meeting:
+           weather, sports scores, celebrity gossip, cooking recipes, personal greetings.
+           Do NOT use NONE for education or technology topics — search the transcripts first.
 
 Question: {query}
 
 Respond with exactly one word: SQL, RAG, HYBRID, or NONE."""
+
+# Keep this prompt SHORT. Measured 2026-08-16 against gemini-3.5-flash: an
+# expanded NONE definition (1881 chars vs 1273) ran 12.8-15.1s against this
+# one's 7.5-10.7s, and classified nothing better — both label "capital of
+# France", "who wrote Hamlet" and "17 times 23" as NONE, despite the list above
+# naming none of them. Since a classifier that overruns LLM_ROUTER_READ_TIMEOUT
+# falls back to "hybrid", extra prompt length converts directly into wrong
+# routes. Adding an example here is not free.
 
 
 # The classifier answers with one word. The old Ollama call relied on a hard
