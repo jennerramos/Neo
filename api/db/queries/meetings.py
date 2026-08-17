@@ -1,13 +1,12 @@
 """DB queries for meetings endpoints."""
 from __future__ import annotations
-import json
-from pathlib import Path
 from typing import Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import text
-import sys
-sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
-import config
+
+# json / config / the sys.path hack are gone with the last chunks.jsonl read:
+# transcript text now comes from the `chunks` table, so this module no longer
+# reaches into data/ and no longer needs the repo root on sys.path.
 
 
 def list_meetings(
@@ -92,29 +91,18 @@ def get_meeting_overview(db: Session, meeting_id: int) -> Optional[dict]:
         ORDER BY action_id
     """), {"mid": meeting_id}).fetchall()
 
-    # Key transcript chunks (top 5 by quality_score)
-    chunks = []
-    school_slug = meeting.get("school_slug", "")
-    video_id    = meeting.get("video_id", "")
-    jsonl_path  = config.PROCESSED_DIR / school_slug / video_id / "chunks.jsonl"
-    if jsonl_path.exists():
-        all_chunks = []
-        with open(jsonl_path, encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if line:
-                    all_chunks.append(json.loads(line))
-        top = sorted(all_chunks, key=lambda c: c.get("quality_score", 0), reverse=True)[:5]
-        chunks = [
-            {
-                "chunk_id":    c.get("chunk_id", ""),
-                "speaker":     c.get("speaker"),
-                "start_time":  c.get("start_time"),
-                "text":        c.get("text", ""),
-                "quality_score": c.get("quality_score"),
-            }
-            for c in top
-        ]
+    # Key transcript chunks (top 5 by quality_score). From the `chunks` table
+    # for the same reason as get_meeting_transcript below: the JSONL under
+    # data/ is workstation-only and absent from any container, so this silently
+    # returned an empty highlights list everywhere but a dev machine.
+    key = db.execute(text("""
+        SELECT chunk_id, speaker, start_time, text, quality_score
+        FROM chunks
+        WHERE meeting_id = :mid
+        ORDER BY quality_score DESC NULLS LAST, chunk_index
+        LIMIT 5
+    """), {"mid": meeting_id}).fetchall()
+    chunks = [dict(r._mapping) for r in key]
 
     return {
         "meeting":    meeting,
@@ -136,28 +124,26 @@ def get_meeting_transcript(db: Session, meeting_id: int) -> Optional[dict]:
         return None
     meeting = dict(m._mapping)
 
-    school_slug = meeting.get("school_slug", "")
-    video_id    = meeting.get("video_id", "")
-    jsonl_path  = config.PROCESSED_DIR / school_slug / video_id / "chunks.jsonl"
+    # Segments come from the `chunks` table, not from
+    # PROCESSED_DIR/<school>/<video_id>/chunks.jsonl as they used to.
+    #
+    # The JSONL lives in data/, which is workstation-only: it is gigabytes of
+    # audio and transcripts, it is in .dockerignore, and it is not part of the
+    # pg_dump that seeds the VPS. So the file read returned zero segments for
+    # every meeting in a container, and the UI showed "Transcript isn't
+    # available for this meeting yet" on every citation click-through -- the
+    # main path from an answer back to its source.
+    #
+    # Postgres already holds the same text (12,769 rows across 534 meetings),
+    # written by the same indexer pass, and it travels with the database.
+    rows = db.execute(text("""
+        SELECT chunk_id, chunk_index, speaker, start_time, end_time,
+               text, token_count, quality_score
+        FROM chunks
+        WHERE meeting_id = :mid
+        ORDER BY chunk_index, start_time
+    """), {"mid": meeting_id}).fetchall()
 
-    segments: list[dict] = []
-    if jsonl_path.exists():
-        with open(jsonl_path, encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                c = json.loads(line)
-                segments.append({
-                    "chunk_id":      c.get("chunk_id", ""),
-                    "chunk_index":   c.get("chunk_index"),
-                    "speaker":       c.get("speaker"),
-                    "start_time":    c.get("start_time"),
-                    "end_time":      c.get("end_time"),
-                    "text":          c.get("text", ""),
-                    "token_count":   c.get("token_count"),
-                    "quality_score": c.get("quality_score"),
-                })
-        segments.sort(key=lambda s: (s.get("chunk_index") or 0, s.get("start_time") or 0))
+    segments = [dict(r._mapping) for r in rows]
 
     return {"meeting": meeting, "segments": segments}
