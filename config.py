@@ -210,6 +210,22 @@ RETRIEVAL_TOP_K: int  = int(os.getenv("RETRIEVAL_TOP_K", "20"))   # candidates f
 RERANK_TOP_K: int     = int(os.getenv("RERANK_TOP_K", "8"))        # passed to LLM after rerank
 RERANKER_MODEL: str   = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
 
+# Which cross-encoder runtime to score with:
+#   torch  sentence-transformers CrossEncoder. The default, and what every
+#          indexed answer to date was reranked with.
+#   onnx   fastembed TextCrossEncoder. Measured 5-32x faster on CPU, which
+#          matters a great deal on a small VPS and not at all on the GPU
+#          workstation. Note fastembed does NOT offer bge-reranker-v2-m3, so
+#          switching backend also means switching model — set RERANKER_MODEL
+#          to one of TextCrossEncoder.list_supported_models().
+RERANKER_BACKEND: str = os.getenv("RERANKER_BACKEND", "torch").strip().lower()
+
+# Thread cap for the ONNX runtime. Left unset it inherits fastembed's default,
+# which reads the *host* core count and oversubscribes a cpu-limited container.
+RERANKER_THREADS: int | None = (
+    int(os.environ["RERANKER_THREADS"]) if os.getenv("RERANKER_THREADS") else None
+)
+
 # ---------------------------------------------------------------------------
 # Pipeline thresholds (Quality Gate)
 # ---------------------------------------------------------------------------

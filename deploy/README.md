@@ -172,6 +172,65 @@ decides whether the pilot feels usable. Two conclusions:
    is a direct argument for doing **P2-0** (expand eval to ≥25 cases) *before*
    go-live rather than in the first pilot week.
 
+## The ONNX reranker (`RERANKER_BACKEND=onnx`)
+
+Reranking was **28.2 s of that 29 s**. It is not *a* contributor to VPS latency;
+it is the whole of it. `rag/retriever.py` can now score with fastembed's ONNX
+cross-encoder instead of sentence-transformers, selected by `RERANKER_BACKEND`.
+
+Rerank-only, 12 real queries × 20 candidates, 2 threads, agreement measured
+against today's production ordering:
+
+| model | median/query | speedup | top-8 overlap | Spearman |
+|---|---|---|---|---|
+| torch `bge-reranker-v2-m3` (default) | 28.2 s | 1.0× | 100% | 1.00 |
+| onnx `ms-marco-MiniLM-L-6-v2` | **0.88 s** | **32×** | 67% | 0.60 |
+| onnx `jina-reranker-v1-turbo-en` | 1.16 s | 24× | 54% | 0.49 |
+| onnx `ms-marco-MiniLM-L-12-v2` | 1.72 s | 16× | 59% | 0.53 |
+| onnx `bge-reranker-base` | 4.95 s | 5.7× | 69% | 0.70 |
+| onnx `jina-reranker-v2-base-multilingual` | 6.52 s | 4.3× | 69% | 0.66 |
+
+End-to-end `retrieve()` on a simulated 2-vCPU box: **29.04 s → 1.49 s**.
+Image size: **2.35 GB → 1.07 GB** (the v2-m3 weights are ~2 GB; MiniLM is 80 MB).
+
+fastembed does not publish `bge-reranker-v2-m3`, so this is a model change, not
+just a runtime change — the ordering genuinely differs. Build it in:
+
+```bash
+docker build -t neo-api \
+  --build-arg RERANKER_BACKEND=onnx \
+  --build-arg RERANKER_MODEL=Xenova/ms-marco-MiniLM-L-6-v2 .
+```
+
+Set `RERANKER_THREADS` to the vCPU count; fastembed otherwise reads the host's
+core count and oversubscribes a cpu-limited container.
+
+### What the evidence does and does not support
+
+**The 9-case eval set cannot judge this change.** Run twice against an
+*unchanged* container it scored 5/9 then 6/9, flipping on ask-002 — the router
+LLM is nondeterministic, and that noise is as large as the entire effect being
+measured. Any "onnx scored lower" reading from it is measuring dice.
+
+So retrieval was probed directly instead — same stage-1 candidates, each
+reranker picks its top 8, does any chunk contain the case's expected keywords:
+
+| backend | evidence surfaced |
+|---|---|
+| torch `bge-reranker-v2-m3` | 8/8 |
+| onnx `ms-marco-MiniLM-L-6-v2` | 8/8 |
+| onnx `bge-reranker-base` | 7/8 |
+
+MiniLM-L-6 holds up despite reordering heavily — 67% overlap is a different
+ordering, not a worse one. But 8 cases with every backend at ceiling is weak
+evidence, and it cannot detect a subtle quality loss. **P2-0 (expand to ≥25
+cases with `expected_chunk_ids` and precision@8) is the prerequisite for
+calling this decision settled**, and is now also the prerequisite for judging
+`RETRIEVAL_TOP_K=10`.
+
+The default stays `torch`: the workstation has a GPU where none of this
+matters, and no indexed answer to date was reranked any other way.
+
 ## Building on the VPS
 
 A 2 vCPU / 4 GB box can build both images, but not quickly, and the Next.js

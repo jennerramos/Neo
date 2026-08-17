@@ -45,8 +45,16 @@ RUN pip install -r /tmp/requirements-api.txt
 FROM python:${PYTHON_VERSION}-slim AS runtime
 
 # Reranker identity is a build arg *and* an env var so the weights baked below
-# are guaranteed to be the ones config.py asks for at boot. Override both
-# together (--build-arg) if you ever change reranker.
+# are guaranteed to be the ones config.py asks for at boot.
+#
+# The ONNX backend is 5-32x faster on CPU, which decides whether a small VPS is
+# usable (see the benchmark table in deploy/README.md). fastembed does not
+# publish bge-reranker-v2-m3, so switching backend also switches model:
+#
+#   docker build \
+#     --build-arg RERANKER_BACKEND=onnx \
+#     --build-arg RERANKER_MODEL=Xenova/ms-marco-MiniLM-L-6-v2 .
+ARG RERANKER_BACKEND=torch
 ARG RERANKER_MODEL=BAAI/bge-reranker-v2-m3
 
 # HF_HOME covers sentence-transformers; FASTEMBED_CACHE_PATH is where fastembed
@@ -57,6 +65,7 @@ ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     RERANKER_MODEL=${RERANKER_MODEL} \
+    RERANKER_BACKEND=${RERANKER_BACKEND} \
     HF_HOME=/home/neo/.cache/huggingface \
     FASTEMBED_CACHE_PATH=/home/neo/.cache/fastembed
 
@@ -65,17 +74,6 @@ RUN useradd --create-home --uid 10001 neo
 COPY --from=builder /opt/venv /opt/venv
 
 WORKDIR /app
-
-# Source. Only the serving path plus what `alembic upgrade head` and
-# `database/seed.py` need on first deploy (P1-4). pipeline/ is deliberately
-# absent — nothing under api/ or rag/ imports it, and it drags in the whole
-# ASR/extraction stack.
-COPY --chown=neo:neo config.py alembic.ini ./
-COPY --chown=neo:neo api/           ./api/
-COPY --chown=neo:neo rag/           ./rag/
-COPY --chown=neo:neo llm/           ./llm/
-COPY --chown=neo:neo database/      ./database/
-COPY --chown=neo:neo observability/ ./observability/
 
 # observability/query_log.py appends to data/query_log.jsonl relative to cwd.
 # Creating it owned by neo also fixes ownership on the named volume compose
@@ -86,22 +84,45 @@ RUN mkdir -p /app/data && chown neo:neo /app/data
 USER neo
 
 # Bake the retrieval models into the image rather than downloading them on
-# first boot. ~1.2 GB either way, but baking buys three things: deterministic
+# first boot. Same bytes either way, but baking buys three things: deterministic
 # start-up time, restarts that don't re-download, and a build that fails loudly
 # on a bad model name instead of a container that limps with a cold /ask.
 #
-# Model names are literals here on purpose — config.py does
-# `os.environ["DATABASE_URL"]` at import, which would KeyError during build.
+# This sits BEFORE the source COPY on purpose. It is the most expensive layer in
+# the image (~1.2 GB of downloads), and putting it after the source would make
+# every one-line code edit re-download the lot.
+#
+# Model names come from env rather than config.py: importing config does
+# `os.environ["DATABASE_URL"]`, which would KeyError during a build.
 RUN python - <<'PY'
 import os
 from fastembed import TextEmbedding, SparseTextEmbedding
-from sentence_transformers import CrossEncoder
 
 TextEmbedding(model_name="nomic-ai/nomic-embed-text-v1.5")
 SparseTextEmbedding(model_name="Qdrant/bm25")
-CrossEncoder(os.environ["RERANKER_MODEL"], max_length=512, device="cpu")
-print("baked: dense + sparse + reranker")
+
+backend = os.environ["RERANKER_BACKEND"]
+model   = os.environ["RERANKER_MODEL"]
+if backend == "onnx":
+    from fastembed.rerank.cross_encoder import TextCrossEncoder
+    TextCrossEncoder(model_name=model)
+else:
+    from sentence_transformers import CrossEncoder
+    CrossEncoder(model, max_length=512, device="cpu")
+print("baked: dense + sparse + %s reranker (%s)" % (backend, model))
 PY
+
+# Source last: it is the layer that changes on every commit, and everything
+# above it is expensive and stable.
+# Only the serving path plus what `alembic upgrade head` and `database/seed.py`
+# need on first deploy (P1-4). pipeline/ is deliberately absent — nothing under
+# api/ or rag/ imports it, and it drags in the whole ASR/extraction stack.
+COPY --chown=neo:neo config.py alembic.ini ./
+COPY --chown=neo:neo api/           ./api/
+COPY --chown=neo:neo rag/           ./rag/
+COPY --chown=neo:neo llm/           ./llm/
+COPY --chown=neo:neo database/      ./database/
+COPY --chown=neo:neo observability/ ./observability/
 
 EXPOSE 8000
 
