@@ -411,23 +411,21 @@ Classify the question into exactly one category:
            requires searching meeting transcripts. Use RAG for ANY topic that could appear
            in a college board meeting — technology, AI, cloud, innovation, programs, etc.
   HYBRID – Needs BOTH structured records AND transcript search for a complete answer.
-  NONE   – The question does not depend on anything anyone said at a board meeting.
-           The test: would the answer be exactly the same if these transcripts had
-           never existed? If yes, it is NONE. That covers general knowledge and
-           trivia (capital cities, historical dates, arithmetic, definitions),
-           news and events unrelated to the college, weather, sports, celebrity
-           gossip, recipes, requests to write code or fiction, and greetings or
-           small talk.
-
-           Do NOT use NONE just because a topic sounds unfamiliar, technical or
-           specific. Education, technology, AI, budgets, contracts, facilities,
-           personnel, accreditation and community topics all belong in a board
-           meeting — search the transcripts first. If you are genuinely torn
-           between NONE and RAG, choose RAG.
+  NONE   – ONLY for things that absolutely cannot appear in any board meeting:
+           weather, sports scores, celebrity gossip, cooking recipes, personal greetings.
+           Do NOT use NONE for education or technology topics — search the transcripts first.
 
 Question: {query}
 
 Respond with exactly one word: SQL, RAG, HYBRID, or NONE."""
+
+# Keep this prompt SHORT. Measured 2026-08-16 against gemini-3.5-flash: an
+# expanded NONE definition (1881 chars vs 1273) ran 12.8-15.1s against this
+# one's 7.5-10.7s, and classified nothing better — both label "capital of
+# France", "who wrote Hamlet" and "17 times 23" as NONE, despite the list above
+# naming none of them. Since a classifier that overruns LLM_ROUTER_READ_TIMEOUT
+# falls back to "hybrid", extra prompt length converts directly into wrong
+# routes. Adding an example here is not free.
 
 
 # The classifier answers with one word. The old Ollama call relied on a hard

@@ -132,13 +132,15 @@ LLM_ROUTER_MAX_TOKENS: int = int(os.getenv("LLM_ROUTER_MAX_TOKENS", "16"))
 # off-topic questions never reached NONE and specific lookups never reached
 # SQL. It read like model nondeterminism and was a stopwatch.
 #
-# 15s is still an order of magnitude below generation's budget, and costs
-# nothing in the normal case — a classifier that answers in 4s returns in 4s.
-# Drop it back to ~5s only if you are serving from a local Ollama.
+# Provider latency also moves hour to hour: the same call measured 4.0-5.2s
+# early on 2026-08-16 and 7.5-10.7s later the same day. 20s covers both regimes
+# with margin. It costs nothing in the normal case — a classifier that answers
+# in 4s returns in 4s — and stays an order of magnitude below generation's
+# budget. Drop it back to ~5s only if you are serving from a local Ollama.
 LLM_CONNECT_TIMEOUT: float = float(os.getenv("LLM_CONNECT_TIMEOUT", "5"))
 LLM_READ_TIMEOUT:    float = float(os.getenv("LLM_READ_TIMEOUT", "120"))
 LLM_ROUTER_CONNECT_TIMEOUT: float = float(os.getenv("LLM_ROUTER_CONNECT_TIMEOUT", "5"))
-LLM_ROUTER_READ_TIMEOUT:    float = float(os.getenv("LLM_ROUTER_READ_TIMEOUT", "15"))
+LLM_ROUTER_READ_TIMEOUT:    float = float(os.getenv("LLM_ROUTER_READ_TIMEOUT", "20"))
 
 # ---------------------------------------------------------------------------
 # LLM — extraction pipeline (offline batch: extractor + initiative_extractor)
