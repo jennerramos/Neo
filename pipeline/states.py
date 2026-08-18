@@ -46,6 +46,13 @@ INDEXED:       Final = "indexed"
 # Re-runnable terminal state — quality_gate can pick these up via --recheck.
 REJECTED:      Final = "rejected"
 
+# Deliberately excluded from the pilot corpus for being older than
+# config.MEETING_YEAR_CUTOFF. Terminal and intentional: it appears in no
+# INPUTS or RECHECK_INPUTS tuple, so no phase — including a --reprocess or
+# --recheck run — will pick these up again. Distinct from REJECTED, which
+# means "we tried and the content was unusable"; these were never in scope.
+ARCHIVED_OLD:  Final = "archived_old"
+
 # Terminal-failure states (no automatic recovery — see scripts/recover_failed.py).
 ASR_FAILED:        Final = "asr_failed"
 PROCESSING_FAILED: Final = "processing_failed"
@@ -64,7 +71,7 @@ ALL_STATUSES: Final[frozenset[str]] = frozenset({
     DISCOVERED, CAPTIONED, NEEDS_ASR, DOWNLOADING, TRANSCRIBING, TRANSCRIBED,
     PROCESSED, EXTRACTED, APPROVED, INDEXED,
     REJECTED, ASR_FAILED, PROCESSING_FAILED, FAILED, PENDING,
-    CAPTION_UNAVAILABLE,
+    CAPTION_UNAVAILABLE, ARCHIVED_OLD,
 })
 
 TERMINAL_FAILURES: Final[frozenset[str]] = frozenset({
