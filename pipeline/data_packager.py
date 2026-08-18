@@ -35,6 +35,7 @@ import re
 import sys
 import time
 import uuid
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
@@ -67,6 +68,7 @@ PROCESSING_VERSION = f"whisperx_v1_cleaner_v{CLEANER_VERSION}"
 TARGET_TOKENS      = 400   # target tokens per chunk
 MAX_TOKENS         = 500   # hard cap before forced split
 OVERLAP_SENTENCES  = 1     # sentences of overlap between adjacent chunks
+OVERLAP_WORDS      = 40    # hard cap on that overlap, for unpunctuated captions
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +222,79 @@ def build_meeting_json(
 # Chunker
 # ---------------------------------------------------------------------------
 
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+
+
+def _split_oversized_segment(seg: CleanedSegment) -> List[CleanedSegment]:
+    """
+    Split a single segment whose text exceeds MAX_TOKENS into several segments.
+
+    build_chunks() only force-flushes *between* segments, so a segment that is
+    itself larger than the cap used to pass through whole. Bulk caption exports
+    (YouTube especially) deliver an entire meeting as one undifferentiated
+    segment, which produced one enormous chunk — up to 47,729 tokens — and the
+    quality gate then rejected the meeting for having fewer than 5 chunks. That
+    silently cost 178 of 541 meetings, ~145 of them full-length.
+
+    Prefers sentence boundaries; auto-captions frequently carry no terminal
+    punctuation at all, so it falls back to wrapping on word boundaries.
+    """
+    if _count_tokens(seg.text) <= MAX_TOKENS:
+        return [seg]
+
+    # 1. Break into units no larger than TARGET_TOKENS.
+    units: List[str] = []
+    for piece in (p for p in _SENTENCE_END.split(seg.text) if p.strip()):
+        if _count_tokens(piece) <= TARGET_TOKENS:
+            units.append(piece)
+            continue
+        words = piece.split()
+        # ~1.3 tokens/word, matching the heuristic in _count_tokens.
+        step = max(1, int(TARGET_TOKENS / 1.3))
+        for i in range(0, len(words), step):
+            units.append(" ".join(words[i : i + step]))
+
+    # 2. Regroup units up to TARGET_TOKENS so the caller's packing still works.
+    groups: List[str] = []
+    buf: List[str] = []
+    buf_tokens = 0
+    for unit in units:
+        tokens = _count_tokens(unit)
+        if buf and buf_tokens + tokens > TARGET_TOKENS:
+            groups.append(" ".join(buf))
+            buf, buf_tokens = [], 0
+        buf.append(unit)
+        buf_tokens += tokens
+    if buf:
+        groups.append(" ".join(buf))
+
+    if not groups:
+        return [seg]
+
+    # 3. Interpolate timings by character share. These are approximate, but a
+    #    seek link landing near the right minute beats every piece claiming the
+    #    whole meeting's span. Word-level timings cannot survive the split, so
+    #    they are dropped rather than left misaligned.
+    total_chars = sum(len(g) for g in groups) or 1
+    span = max(0.0, seg.end - seg.start)
+    out: List[CleanedSegment] = []
+    cursor = seg.start
+    for group in groups:
+        end = cursor + span * (len(group) / total_chars)
+        out.append(replace(
+            seg, text=group, start=round(cursor, 3), end=round(end, 3), words=[]
+        ))
+        cursor = end
+    # Guard against float drift so the last piece ends exactly where seg did.
+    out[-1] = replace(out[-1], end=seg.end)
+
+    log.info(
+        "split oversized segment (%s tokens) into %s pieces",
+        _count_tokens(seg.text), len(out),
+    )
+    return out
+
+
 def build_chunks(
     segments:    List[CleanedSegment],
     video_id:    str,
@@ -230,6 +305,8 @@ def build_chunks(
     Split CleanedSegments into overlapping RAG chunks.
 
     Strategy:
+      - Split any single segment that already exceeds MAX_TOKENS, so an
+        unsegmented caption file cannot collapse into one giant chunk
       - Target ~TARGET_TOKENS tokens per chunk
       - Never split within a speaker's turn if it's under MAX_TOKENS
       - Add OVERLAP_SENTENCES sentences from the previous chunk for context
@@ -239,6 +316,13 @@ def build_chunks(
     """
     if not segments:
         return []
+
+    # Oversized segments are expanded up front so the packing loop below can
+    # assume every segment is already under the cap.
+    expanded: List[CleanedSegment] = []
+    for seg in segments:
+        expanded.extend(_split_oversized_segment(seg))
+    segments = expanded
 
     chunks: List[dict] = []
     buf_segs:    List[CleanedSegment] = []
@@ -273,10 +357,18 @@ def build_chunks(
         if speaker is None and source_type == "whisperx_asr":
             quality *= 0.85
 
-        # Carry-over last OVERLAP_SENTENCES sentences for next chunk
-        all_text   = " ".join(s.text for s in buf_segs)
-        sents      = [s.strip() for s in all_text.split(".") if s.strip()]
-        overlap_tail = ". ".join(sents[-OVERLAP_SENTENCES:]) + "." if sents else ""
+        # Carry-over last OVERLAP_SENTENCES sentences for next chunk.
+        #
+        # Auto-caption text frequently contains no terminal punctuation at all.
+        # Splitting such text on "." yields a single "sentence" — the whole
+        # chunk — so the carry-in was the entire previous chunk. That doubled
+        # the corpus (45,164 source words became 82,937) and pushed every chunk
+        # past MAX_TOKENS. Cap the tail by words regardless of how it was found.
+        all_text = " ".join(s.text for s in buf_segs)
+        sents    = [s.strip() for s in _SENTENCE_END.split(all_text) if s.strip()]
+        tail     = " ".join(sents[-OVERLAP_SENTENCES:]) if len(sents) > 1 else all_text
+        tail_words   = tail.split()
+        overlap_tail = " ".join(tail_words[-OVERLAP_WORDS:]) if tail_words else ""
 
         chunk = {
             "chunk_id":     f"{video_id}_{idx:04d}",

@@ -63,6 +63,19 @@ YT_DLP_COOKIES_BROWSER: str = os.getenv("YT_DLP_COOKIES_BROWSER", "firefox")
 PROXY_LIST: list = [p.strip() for p in os.getenv("PROXY_LIST", "").split(",") if p.strip()]
 
 # ---------------------------------------------------------------------------
+# Corpus age cutoff
+# ---------------------------------------------------------------------------
+#
+# Meetings that took place before this year are not worth downloading,
+# processing or indexing for the pilot.
+#
+# Applied against the meeting's RESOLVED date, not published_date — see
+# pipeline/meeting_dates.py. The previous filter compared published_date
+# (the upload date) to a hardcoded 2023-04-08, which let 52 pre-2020 meetings
+# through simply because a channel had backfilled them recently.
+MEETING_YEAR_CUTOFF: int = int(os.getenv("MEETING_YEAR_CUTOFF", "2024"))
+
+# ---------------------------------------------------------------------------
 # ASR — WhisperX
 # ---------------------------------------------------------------------------
 

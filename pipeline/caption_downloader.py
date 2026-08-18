@@ -26,7 +26,7 @@ import logging
 import random
 import sys
 import time
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -36,6 +36,7 @@ from sqlalchemy.orm import sessionmaker
 
 import config
 from database.models import Meeting, School, PipelineRun
+from pipeline.meeting_dates import is_too_old
 from pipeline.sources import for_school
 from pipeline.sources.base import FetchResult
 
@@ -152,15 +153,29 @@ def main() -> None:
             session.query(Meeting, School)
             .join(School, School.school_id == Meeting.school_id)
             .filter(Meeting.status == "discovered")
-            .filter(Meeting.published_date >= date(2023, 4, 8))
             .order_by(School.school_id, Meeting.published_date.desc())
         )
         if args.school:
             query = query.filter(School.slug == args.school)
-        if args.limit:
-            query = query.limit(args.limit)
 
-        meetings = query.all()
+        # Age filter runs in Python, not SQL, because the meeting's real date
+        # often lives in the title rather than published_date. Filtering on
+        # published_date alone (as this did) admitted 52 pre-2020 meetings that
+        # a channel had merely backfilled recently. See pipeline/meeting_dates.
+        discovered = query.all()
+        candidates = [
+            (m, s) for (m, s) in discovered
+            if not is_too_old(m.title, m.published_date, s.slug,
+                              config.MEETING_YEAR_CUTOFF)
+        ]
+        skipped_old = len(discovered) - len(candidates)
+        if skipped_old:
+            print(f"Skipped       : {skipped_old} meeting(s) older than "
+                  f"{config.MEETING_YEAR_CUTOFF}")
+
+        # --limit applies after the age filter so it selects meetings that will
+        # actually be processed, rather than being spent on skipped ones.
+        meetings = candidates[: args.limit] if args.limit else candidates
 
         if not meetings:
             print("[INFO] No meetings with status='discovered' found.")
