@@ -60,6 +60,14 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # The reranker weights are baked into the image, so the build must agree
+      # with the runtime values in the env file. Sourcing both from the same
+      # variables keeps them from drifting: a plain `up -d --build` would
+      # otherwise bake torch while the env file still asked for onnx, and
+      # fastembed would re-download the model on every container start.
+      args:
+        RERANKER_BACKEND: ${RERANKER_BACKEND:-torch}
+        RERANKER_MODEL: ${RERANKER_MODEL:-BAAI/bge-reranker-v2-m3}
     restart: unless-stopped
     env_file:
       # Defaults to the VPS file. The local rehearsal points this at
