@@ -185,6 +185,20 @@ def ask(
 
         meeting_date = str(meeting["published_date"])[:10]
 
+        # The board may have met since the last meeting we can answer about
+        # (no transcript yet, or ASR failed). Say so, rather than letting the
+        # answer imply meeting_date was their most recent meeting.
+        pending_newer = meeting.get("pending_newer")
+        coverage_note = ""
+        if pending_newer:
+            newer_date = str(pending_newer["published_date"])[:10]
+            who = meeting.get("school_name") or meeting["school_slug"].replace("_", " ").title()
+            coverage_note = (
+                f"Note: {who} met more recently, on {newer_date}, but that meeting "
+                f"has no transcript available yet. This answer covers their most "
+                f"recent transcribed meeting, {meeting_date}.\n\n"
+            )
+
         # Scope RAG strictly to this meeting.
         lm_chunks = retrieve(
             query,
@@ -214,6 +228,7 @@ def ask(
             "meeting_date":  meeting_date,
             "school_slug":   meeting["school_slug"],
             "school_name":   meeting.get("school_name"),
+            "pending_newer": pending_newer,
         }
         if stream:
             gen_result = generate(
@@ -222,11 +237,17 @@ def ask(
                 rag_chunks=lm_chunks,
                 stream=True, model=model,
             )
+            lm_stream = gen_result["stream"]
+            if coverage_note:
+                def _noted(note=coverage_note, inner=gen_result["stream"]):
+                    yield note
+                    yield from inner
+                lm_stream = _noted()
             return {
                 **lm_extra,
                 "citations":   gen_result["citations"],
                 "model":       gen_result["model"],
-                "stream":      gen_result["stream"],
+                "stream":      lm_stream,
                 "elapsed_sec": round(time.perf_counter() - t0, 2),
             }
 
@@ -239,7 +260,7 @@ def ask(
         elapsed = round(time.perf_counter() - t0, 2)
         return {
             **lm_extra,
-            "answer":      result["answer"],
+            "answer":      coverage_note + result["answer"],
             "citations":   result["citations"],
             "model":       result["model"],
             "elapsed_sec": elapsed,
