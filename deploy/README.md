@@ -2,8 +2,42 @@
 
 Covers implementation-plan items **P1-1** (backend image), **P1-2** (frontend
 image) and **P1-3** (Compose stack + Caddy TLS), plus the P0-2 auth decision
-that folded into the Caddyfile. P1-4 (provision + cutover), P1-5 (workstation →
-VPS data flow) and P1-6 (backups) are outlined at the end but not yet built.
+that folded into the Caddyfile. **P1-4** (provision + cutover) and **P1-6**
+(backups) are now done and are recorded below rather than proposed; **P1-5**
+(workstation → VPS data flow) is still outlined at the end and not yet built.
+
+## The live pilot
+
+Since **2026-08-21** the pilot serves `https://neoboardinsights.com` (and
+`www.`) with a Let's Encrypt certificate. Before that it ran IP-only over plain
+HTTP for four days.
+
+| | |
+|---|---|
+| Host | OVH `15.204.248.52`, Ubuntu 24.04, 4 vCPU / 7.7 GB / 72 GB |
+| SSH | `ubuntu@`, key `~/.ssh/neo_vps` — **not `root@`**, which is refused |
+| Repo | `~/neo`, deployed with `--env-file deploy/.env.deploy` |
+| DNS | Cloudflare, apex `A` + `www` `CNAME`, both **grey-cloud** |
+| Serving LLM | `gemini` / `gemini-3.5-flash` |
+| Reranker | `onnx` / `Xenova/ms-marco-MiniLM-L-6-v2`, `RERANKER_THREADS=4` |
+| Pinned | `POSTGRES_IMAGE_TAG=16-alpine`, `QDRANT_IMAGE_TAG=v1.17.1` |
+
+**The Cloudflare records must stay DNS-only (grey cloud).** Cloudflare's proxy
+buffers `text/event-stream`, which would silently undo everything the Caddyfile
+does to keep SSE a stream — the symptom is a whole answer landing at once after
+~30 s, with nothing in the logs to explain it. The accepted cost is that the
+origin IP is public and there is no CDN or DDoS layer in front of it.
+
+Two corrections to figures quoted further down this file, both measured on the
+real box under real traffic rather than in a container simulation:
+
+- **The API is ~2.5 GB resident once it has served queries**, not the 1.42 GB
+  measured idle-after-warm-up. The reranker arena grows. 4 GB would have been
+  genuinely tight; the 8 GB-class box was the right call.
+- **The simulated CPU benchmarks below ran about 2× optimistic.** Real
+  end-to-end `/ask` on the torch reranker was 48–57 s per question, not the
+  ~29 s the `--cpus`-limited runs predicted. Switching to onnx took it to
+  **4.6–7.9 s**.
 
 ## Shape of the thing
 
@@ -41,9 +75,22 @@ retrieval: fastembed dense + sparse (ONNX) and the BGE reranker (torch CPU),
 
 ## First deploy
 
-Prerequisites: a VPS with Docker installed, and `neo.<domain>` A/AAAA records
-already pointing at it — Caddy provisions the certificate on first boot and
-needs DNS to resolve before it can.
+Prerequisites: a VPS with Docker installed, and DNS records already pointing at
+it — Caddy provisions the certificate on first boot over an HTTP-01 challenge,
+so the name must resolve **and port 80 must be open** before it can. Confirm
+both before restarting Caddy; a premature attempt earns an ACME back-off you
+then have to wait out.
+
+`NEO_DOMAIN` takes Caddy site addresses, so more than one name is a
+comma-separated list — each gets its own certificate and both serve the app:
+
+```
+NEO_DOMAIN="neoboardinsights.com, www.neoboardinsights.com"
+```
+
+Adding or changing the domain never needs an image rebuild. The frontend calls
+a relative `/api` and so never learns its own hostname; `up -d caddy` is the
+whole change.
 
 ```bash
 git clone <repo> neo && cd neo
@@ -73,9 +120,10 @@ docker compose --env-file deploy/.env.deploy exec api alembic upgrade head
 docker compose --env-file deploy/.env.deploy exec api python database/seed.py
 
 # smoke
-curl https://neo.<domain>/api/health                  # 200, no credentials
-curl -u pilot:<pw> https://neo.<domain>/api/schools   # 8 rows
-curl https://neo.<domain>/api/schools                 # 401
+curl https://neoboardinsights.com/api/health                # 200, no credentials
+curl -u pilot:<pw> https://neoboardinsights.com/api/schools # 8 rows
+curl https://neoboardinsights.com/api/schools               # 401
+curl -sI http://neoboardinsights.com/ | head -1            # 308, redirect to https
 ```
 
 Data comes over separately: `pg_dump` from the workstation restored into the
@@ -95,7 +143,7 @@ curl -N -u pilot:<pw> \
   -H 'Content-Type: application/json' \
   -H 'Accept: text/event-stream' \
   -d '{"query":"What did the board vote on most recently?"}' \
-  https://neo.<domain>/api/ask?stream=true
+  https://neoboardinsights.com/api/ask?stream=true
 ```
 
 Frames should arrive progressively: one `meta`, many `token`, one `done`. If
@@ -228,8 +276,23 @@ cases with `expected_chunk_ids` and precision@8) is the prerequisite for
 calling this decision settled**, and is now also the prerequisite for judging
 `RETRIEVAL_TOP_K=10`.
 
-The default stays `torch`: the workstation has a GPU where none of this
-matters, and no indexed answer to date was reranked any other way.
+### Settled — P2-0 landed, and onnx shipped
+
+The eval set is now 33 grounded cases with `expected_chunk_ids`, which is
+enough signal to judge a reranker instead of measuring router dice. Against it
+the onnx backend scored **33/33 with chunk recall unchanged**, so the reordering
+really is a different ordering and not a worse one. It went live on the VPS on
+2026-08-17 and took `/ask` from 48–57 s to **4.6–7.9 s** per question.
+
+`RETRIEVAL_TOP_K=10` never had to be decided: with onnx doing the reranking,
+`20` is affordable, so the VPS keeps the better recall and the question is moot.
+
+**The repo default is still `torch`, and that is deliberate** — the workstation
+has a GPU where none of this matters, and the indexed corpus was built with the
+v2-m3 ordering. The backend is chosen per-deployment in the env file, and only
+the VPS sets `onnx`. Because the weights are baked in at build time, changing it
+means a rebuild: `docker-compose.yml` sources the build args from the same env
+file for exactly this reason, so the image and the runtime cannot drift apart.
 
 ## Building on the VPS
 
@@ -264,9 +327,16 @@ the `openai`, `anthropic` and `ollama` SDKs all ship in the image and
   so the tunnel reaches them and the public interface does not. The pipeline
   stays on the workstation: it needs the GPU, and `PIPELINE_LLM_*` is a
   separate namespace from the serving `LLM_*` on purpose.
-- **P1-6 — nightly backup.** `pg_dump | gzip | rclone` to B2/R2, 14 daily + 4
-  weekly, plus one restore drill before the pilot opens. The Qdrant collection
-  is rebuildable from `chunks.jsonl`, so Postgres is the thing that must not be
-  lost — along with the `caddy_data` volume, which holds the ACME account.
-- **P3-14 — UptimeRobot** on `https://neo.<domain>/api/health`, which is
+- **P1-6 — offsite copy of the nightly backup.** The nightly itself is *done*
+  and running: `neo-backup.timer` at 03:30 UTC writes `neo_v2` and the
+  `caddy_data` volume to `/var/backups/neo/{daily,weekly}` with 14+4 retention,
+  and a restore drill passed on 2026-08-17. What is missing is that the
+  destination is the VPS's own disk, so it survives a bad deploy but not a lost
+  box. Enabling offsite is one uncommented `rclone` block marked `OFFSITE` in
+  `/usr/local/bin/neo-backup.sh`. Deferred while the workstation is still a full
+  mirror of the VPS — that argument expires the moment P1-5 lands, or once the
+  pilot query logs in the `api_data` volume become the only record of usage.
+  Note the `caddy_data` volume now holds live certificate private keys, not just
+  the ACME account, so its tarball is `chmod 600` in the script.
+- **P3-14 — UptimeRobot** on `https://neoboardinsights.com/api/health`, which is
   unauthenticated precisely so this works.
