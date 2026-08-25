@@ -183,9 +183,10 @@ case(id="ask-025", route_kind="hybrid", expected_route=["hybrid", "sql"],
 # ── LATEST_MEETING: resolve the right meeting, per school ───────────────────
 case(id="ask-004", route_kind="latest_meeting", expected_route="latest_meeting",
      question="What happened at HCC's last board meeting?",
-     expected_school_slug="houston_city_college", expected_meeting_ids=[474],
+     expected_school_slug="houston_city_college", expected_meeting_ids=[805],
      must_contain_any=SUMMARY,
-     notes="Latest HCC meeting is 474 (2026-04-22).")
+     notes="Latest INDEXED HCC meeting is 805 (2026-06-17). Meeting 803 (2026-08-20) "
+           "is newer but needs_asr, so latest_meeting must skip it and disclose the gap.")
 
 case(id="ask-006", route_kind="latest_meeting", expected_route="latest_meeting",
      question="Summarize the last HCC meetings.",
@@ -195,27 +196,27 @@ case(id="ask-006", route_kind="latest_meeting", expected_route="latest_meeting",
 
 case(id="ask-008", route_kind="latest_meeting", expected_route="latest_meeting",
      question="Summarize the last El Paso meeting.",
-     expected_school_slug="el_paso_community_college", expected_meeting_ids=[475],
+     expected_school_slug="el_paso_community_college", expected_meeting_ids=[817],
      must_contain_any=SUMMARY,
-     notes="Latest El Paso meeting is 475 (2026-04-23).")
+     notes="Latest El Paso meeting is 817 (2026-08-11).")
 
 case(id="ask-026", route_kind="latest_meeting", expected_route="latest_meeting",
      question="What happened at the most recent Dallas College board meeting?",
-     expected_school_slug="dallas_college", expected_meeting_ids=[480],
+     expected_school_slug="dallas_college", expected_meeting_ids=[852],
      must_contain_any=SUMMARY,
-     notes="Latest Dallas College meeting is 480 (2026-05-13).")
+     notes="Latest Dallas College meeting is 852 (2026-08-12).")
 
 case(id="ask-027", route_kind="latest_meeting", expected_route="latest_meeting",
      question="Summarize the latest Lone Star College board meeting.",
-     expected_school_slug="lone_star_college", expected_meeting_ids=[39],
+     expected_school_slug="lone_star_college", expected_meeting_ids=[814],
      must_contain_any=SUMMARY,
-     notes="Latest Lone Star meeting is 39 (2026-04-02).")
+     notes="Latest Lone Star meeting is 814 (2026-08-10).")
 
 case(id="ask-028", route_kind="latest_meeting", expected_route="latest_meeting",
      question="What happened at Mt. SAC's last board meeting?",
-     expected_school_slug="mt_san_antonio_college", expected_meeting_ids=[469],
+     expected_school_slug="mt_san_antonio_college", expected_meeting_ids=[832],
      must_contain_any=SUMMARY,
-     notes="Latest Mt. SAC meeting is 469 (2026-03-12). Also checks that 'Mt. SAC' resolves to the slug.")
+     notes="Latest Mt. SAC meeting is 832 (2026-08-13). Also checks that 'Mt. SAC' resolves to the slug.")
 
 # ── COMPARE: two schools in one answer ──────────────────────────────────────
 case(id="ask-029", route_kind="compare", expected_route=["compare", "hybrid", "sql"],
