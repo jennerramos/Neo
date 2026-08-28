@@ -141,12 +141,81 @@ def resolve_held_date(title: Optional[str],
 class _EligibleMeeting:
     """A meeting inside the window, with the date it was actually held."""
 
-    __slots__ = ("meeting_id", "school_slug", "held_date")
+    __slots__ = ("meeting_id", "school_slug", "held_date", "duration_seconds")
 
-    def __init__(self, meeting_id: int, school_slug: str, held_date: date):
-        self.meeting_id  = meeting_id
-        self.school_slug = school_slug
-        self.held_date   = held_date
+    def __init__(self, meeting_id: int, school_slug: str, held_date: date,
+                 duration_seconds: Optional[int]):
+        self.meeting_id       = meeting_id
+        self.school_slug      = school_slug
+        self.held_date        = held_date
+        self.duration_seconds = duration_seconds
+
+
+# ── One board session, however many times it was ingested ────────────────────
+#
+# The corpus contains the same session recorded twice. Alamo's 2026-05-12
+# special meeting is in `meetings` as 639 and 640 — same school, same date,
+# both 4,636 seconds, the titles differing only by a "Committiee"/"Committee"
+# typo — and Lone Star's 2025-10-02 tax-rate hearing is there three times
+# (45, 46, 49). Counted as recordings, two cells on the page announced "2
+# meetings" for one afternoon of board business.
+#
+# Date and school are not enough on their own: 61 same-day pairs in this corpus
+# are genuinely different meetings (a Special Meeting and a Regular Meeting on
+# one evening, a Workshop and a Special Meeting). Duration to the second is
+# what separates a second recording of one session from a second session, so a
+# meeting with no duration is never collapsed.
+#
+# The copies are re-extractions of the same transcript, and the extractor is
+# nondeterministic, so they hold overlapping-but-unequal initiative sets. The
+# richest copy is kept whole and the others dropped, rather than the union
+# being merged: a union would have to reconcile two sets of chunk ids against
+# one session and would put near-identical quotes side by side under the same
+# insight.
+def _collapse_duplicate_recordings(
+    db: Session, meetings: dict[int, _EligibleMeeting]
+) -> dict[int, _EligibleMeeting]:
+    """Keep one recording per board session."""
+    clusters: dict[tuple, list[int]] = {}
+    for m in meetings.values():
+        if m.duration_seconds is None:
+            continue    # cannot confirm it is the same session
+        clusters.setdefault(
+            (m.school_slug, m.held_date, m.duration_seconds), []).append(m.meeting_id)
+
+    duplicated = {k: v for k, v in clusters.items() if len(v) > 1}
+    if not duplicated:
+        return meetings
+
+    # Prefer the copy the extractor got the most out of, so dropping the others
+    # costs as little as possible. meeting_id breaks ties, which keeps the
+    # choice stable across requests — a cell's label becomes its URL.
+    contested = sorted({mid for ids in duplicated.values() for mid in ids})
+    ph, params = _bind_params("dup", contested)
+    counts = dict(db.execute(text(f"""
+        SELECT meeting_id, COUNT(*) AS n
+        FROM initiatives
+        WHERE meeting_id IN ({ph})
+          AND needs_review = FALSE
+        GROUP BY meeting_id
+    """), params).fetchall())
+
+    kept = dict(meetings)
+    dropped = 0
+    for key, ids in duplicated.items():
+        canonical = max(ids, key=lambda mid: (counts.get(mid, 0), -mid))
+        for mid in ids:
+            if mid != canonical:
+                del kept[mid]
+                dropped += 1
+        # Per cluster at DEBUG: this is a stable property of the corpus, and
+        # the page resolves it on every request.
+        log.debug("insights: %s on %s (%ss) ingested %d times; kept %s, dropped %s",
+                  key[0], key[1], key[2], len(ids), canonical,
+                  sorted(set(ids) - {canonical}))
+    log.info("insights: %d duplicated session(s) in window; dropped %d extra recording(s)",
+             len(duplicated), dropped)
+    return kept
 
 
 def eligible_meetings(db: Session, window_start: date,
@@ -162,7 +231,8 @@ def eligible_meetings(db: Session, window_start: date,
     it too. It only keeps the scan small.
     """
     rows = db.execute(text("""
-        SELECT m.meeting_id, s.slug AS school_slug, m.title, m.published_date
+        SELECT m.meeting_id, s.slug AS school_slug, m.title, m.published_date,
+               m.duration_seconds
         FROM meetings m
         JOIN schools s ON s.school_id = m.school_id
         WHERE m.status = 'indexed'
@@ -176,16 +246,17 @@ def eligible_meetings(db: Session, window_start: date,
         held, source = resolve_held_date(r.title, r.published_date)
         if held is None:
             unplaced += 1
-            log.info("insights: meeting %s excluded (%s): %r",
-                     r.meeting_id, source, r.title)
+            log.debug("insights: meeting %s excluded (%s): %r",
+                      r.meeting_id, source, r.title)
             continue
         if window_start <= held <= window_end:
-            out[r.meeting_id] = _EligibleMeeting(r.meeting_id, r.school_slug, held)
+            out[r.meeting_id] = _EligibleMeeting(
+                r.meeting_id, r.school_slug, held, r.duration_seconds)
 
     if unplaced:
         log.info("insights: %d of %d candidate meetings could not be dated",
                  unplaced, len(rows))
-    return out
+    return _collapse_duplicate_recordings(db, out)
 
 
 # Eligibility, written once so the matrix and the detail can never disagree.

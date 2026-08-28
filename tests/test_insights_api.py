@@ -174,6 +174,75 @@ def test_eligible_meetings_are_placed_by_when_the_board_met(db: Session):
         assert start <= m.held_date <= end
 
 
+# ── P1-5: one board session, however many recordings ────────────────────────
+
+def test_a_session_ingested_twice_is_counted_once(db: Session):
+    """Alamo's 2026-05-12 special meeting is in `meetings` twice (639 and 640,
+    both 4,636s, titles differing by a "Committiee" typo) and Lone Star's
+    2025-10-02 tax-rate hearing three times. Counted as recordings, two cells
+    announced "2 meetings" for one afternoon of board business."""
+    from sqlalchemy import text
+
+    eligible = q.eligible_meetings(db, q._window_start(), dt.date.today())
+    assert eligible, "no meetings in the rolling window for this corpus"
+
+    placeholders = ", ".join(f":m{i}" for i in range(len(eligible)))
+    params = {f"m{i}": v for i, v in enumerate(sorted(eligible))}
+    sessions = db.execute(text(f"""
+        SELECT s.slug, m.published_date, m.duration_seconds, COUNT(*) AS n
+        FROM meetings m
+        JOIN schools s ON s.school_id = m.school_id
+        WHERE m.meeting_id IN ({placeholders})
+          AND m.duration_seconds IS NOT NULL
+        GROUP BY s.slug, m.published_date, m.duration_seconds
+        HAVING COUNT(*) > 1
+    """), params).fetchall()
+    assert not sessions, f"duplicate recordings survived: {[tuple(r) for r in sessions]}"
+
+    seen: dict[tuple, int] = {}
+    for m in eligible.values():
+        if m.duration_seconds is None:
+            continue
+        key = (m.school_slug, m.held_date, m.duration_seconds)
+        assert key not in seen, (
+            f"meetings {seen[key]} and {m.meeting_id} are the same session")
+        seen[key] = m.meeting_id
+
+
+def test_two_real_meetings_on_one_day_are_not_collapsed(db: Session):
+    """The guard against over-collapsing. 61 same-day pairs in this corpus are
+    genuinely different meetings — a Special Meeting and a Regular Meeting on
+    one evening — and duration is what separates them from a second recording
+    of one session."""
+    eligible = q.eligible_meetings(db, q._window_start(), dt.date.today())
+    same_day: dict[tuple, int] = {}
+    for m in eligible.values():
+        key = (m.school_slug, m.held_date)
+        same_day[key] = same_day.get(key, 0) + 1
+    assert any(n > 1 for n in same_day.values()), (
+        "no college held two meetings on one day in this window — the guard is "
+        "untested against this corpus"
+    )
+
+
+def test_no_insight_counts_the_same_session_twice(cells: list[dict],
+                                                  details: dict[str, dict], db: Session):
+    """End to end: the meeting count on a card is board sessions, not files."""
+    eligible = q.eligible_meetings(db, q._window_start(), dt.date.today())
+    for c in cells:
+        d = details[c["insight_id"]]
+        keys = [
+            (eligible[m["meeting_id"]].school_slug,
+             eligible[m["meeting_id"]].held_date,
+             eligible[m["meeting_id"]].duration_seconds)
+            for m in d["supporting_meetings"]
+        ]
+        assert len(keys) == len(set(keys)), (
+            f"{c['insight_id']} claims {c['meeting_count']} meetings but they "
+            f"are not distinct sessions: {keys}"
+        )
+
+
 def test_matrix_reports_the_window_it_covers(matrix: dict):
     assert matrix["window_months"] == 6
     assert matrix["window_start"] < matrix["window_end"]
