@@ -1,6 +1,13 @@
 import Link from "next/link";
 import type { InsightDetail } from "@/types";
-import { actionTypeColor, cn, fmtCurrency, fmtDate } from "@/lib/utils";
+import {
+  actionTypeColor,
+  cn,
+  evidenceLevelColor,
+  fmtCurrency,
+  fmtDate,
+} from "@/lib/utils";
+import SourceLink from "@/components/ui/SourceLink";
 
 export type EvidenceVariant = "compact" | "full";
 
@@ -29,13 +36,38 @@ export default function EvidencePanel({
 
   return (
     <div className={cn("space-y-6", compact && "text-sm")}>
-      {/* Summary + why it appears */}
-      <Section title="Summary" compact={compact}>
-        <p className={cn("leading-relaxed", compact ? "text-slate-700" : "text-base text-slate-700")}>
-          {detail.summary}
-        </p>
+      {/* What the record says — the four evidence levels, kept apart.
+          The extractor separates observed / rationale / claimed / measured
+          deliberately, and the API used to concatenate them into one
+          paragraph. A college's forecast then read like a result. */}
+      <Section title="What the record says" compact={compact}>
+        <dl className="space-y-3">
+          <Level
+            term="What the board did"
+            value={detail.observed_action ?? detail.description ?? detail.summary}
+            compact={compact}
+          />
+          <Level
+            term="Why they said they did it"
+            value={detail.stated_rationale}
+            compact={compact}
+          />
+          <Level
+            term="What they expect"
+            value={detail.claimed_outcome}
+            compact={compact}
+            hint="A prediction stated by the college — not a result."
+          />
+          <Level
+            term="What was measured"
+            value={detail.measured_outcome}
+            compact={compact}
+            hint="Reported by college staff in the meeting."
+            emphasise
+          />
+        </dl>
         {detail.why_it_appears && (
-          <p className={cn("mt-2 italic text-slate-400", compact ? "text-xs" : "text-sm")}>
+          <p className={cn("mt-3 text-slate-500", compact ? "text-xs" : "text-sm")}>
             {detail.why_it_appears}
           </p>
         )}
@@ -47,21 +79,48 @@ export default function EvidencePanel({
           <div className="space-y-2">
             {detail.evidence.slice(0, evidenceLimit).map((ev, i) => (
               <div
-                key={i}
-                className={compact
-                  ? "rounded-lg bg-slate-50 p-3"
-                  : "card px-5 py-4"}
+                key={ev.chunk_id ? `${ev.chunk_id}-${i}` : i}
+                className={compact ? "rounded-lg bg-slate-50 p-3" : "card px-5 py-4"}
               >
-                <blockquote className={compact
-                  ? "text-slate-700 leading-relaxed"
-                  : "border-l-4 border-indigo-300 pl-4 text-slate-700 leading-relaxed italic"}>
+                <blockquote
+                  className={
+                    compact
+                      ? "text-slate-700 leading-relaxed"
+                      : "border-l-4 border-indigo-300 pl-4 text-slate-700 leading-relaxed italic"
+                  }
+                >
                   &ldquo;{ev.text}&rdquo;
                 </blockquote>
-                <p className="mt-1.5 text-xs text-slate-400">
-                  {ev.speaker && <><span className="font-medium">{ev.speaker}</span> · </>}
-                  {ev.meeting_title} · {fmtDate(ev.meeting_date)}
-                  {!compact && ev.score != null && <> · {Math.round(ev.score * 100)}% confidence</>}
-                </p>
+                <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-400">
+                  {ev.speaker && <span className="font-medium">{ev.speaker}</span>}
+                  <span>
+                    {ev.meeting_title} · {fmtDate(ev.meeting_date)}
+                  </span>
+                  {/* The quote was located character-for-character in a named
+                      chunk. That is the page's strongest trust signal and it
+                      used to ship in the payload without ever being shown. */}
+                  {ev.verified && (
+                    <span
+                      className="inline-flex items-center gap-1 rounded bg-emerald-50 px-1.5 py-0.5 font-medium text-emerald-700"
+                      title="This quote was matched word-for-word against the meeting transcript."
+                    >
+                      <svg
+                        viewBox="0 0 16 16"
+                        className="h-3 w-3"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        aria-hidden="true"
+                      >
+                        <path d="M3 8.5l3.5 3.5L13 5" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                      Verified
+                    </span>
+                  )}
+                  {ev.meeting_id != null && ev.chunk_id && (
+                    <SourceLink meetingId={ev.meeting_id} chunkIds={[ev.chunk_id]} />
+                  )}
+                </div>
               </div>
             ))}
           </div>
@@ -70,13 +129,17 @@ export default function EvidencePanel({
               +{detail.evidence.length - evidenceLimit} more on the full page
             </p>
           )}
+          <p className={cn("mt-2 text-slate-400", compact ? "text-[11px]" : "text-xs")}>
+            Quotes come from automated transcription and may contain
+            transcription errors. Open the source to check any wording.
+          </p>
         </Section>
       )}
 
-      {/* Supporting meetings */}
+      {/* Supporting meetings — exactly the meetings that produced this insight */}
       {detail.supporting_meetings.length > 0 && (
         <Section
-          title={`Supporting Meetings (${detail.supporting_meetings.length})`}
+          title={`Meetings this comes from (${detail.supporting_meetings.length})`}
           compact={compact}
         >
           {compact ? (
@@ -112,106 +175,114 @@ export default function EvidencePanel({
         </Section>
       )}
 
-      {/* Related votes + financials */}
-      <div className={cn(!compact && detail.related_votes.length > 0 && detail.related_financials.length > 0 && "grid gap-6 sm:grid-cols-2")}>
-        {detail.related_votes.length > 0 && (
-          <Section title="Related Votes" compact={compact}>
-            <div className={compact ? "space-y-2" : "card divide-y divide-slate-100"}>
-              {detail.related_votes.slice(0, votesLimit).map((v) => (
-                <div
-                  key={v.vote_id}
-                  className={compact ? "flex items-start gap-2" : "flex gap-3 px-4 py-3"}
-                >
-                  <span className={cn(
-                    "mt-0.5 shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold leading-none",
-                    v.passed ? "bg-emerald-100 text-emerald-800" : "bg-red-100 text-red-700"
-                  )}>
-                    {compact ? (v.passed ? "PASSED" : "FAILED") : v.passed ? "✓" : "✗"}
-                  </span>
-                  <p className="line-clamp-2 text-sm text-slate-700">{v.motion_text}</p>
-                </div>
-              ))}
-            </div>
-          </Section>
-        )}
-
-        {detail.related_financials.length > 0 && (
-          <Section title="Related Financials" compact={compact}>
-            <div className={compact ? "space-y-1.5" : "card divide-y divide-slate-100"}>
-              {detail.related_financials.slice(0, financialsLimit).map((f) => (
-                <div
-                  key={f.item_id}
-                  className={compact
-                    ? "flex items-center justify-between"
-                    : "flex items-center justify-between px-4 py-3"}
-                >
-                  <p className="line-clamp-1 flex-1 text-sm text-slate-700">
-                    {f.description ?? f.vendor ?? f.category ?? "—"}
-                  </p>
-                  <span className="ml-3 shrink-0 text-sm font-semibold text-slate-900">
-                    {fmtCurrency(f.amount)}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </Section>
-        )}
-      </div>
-
-      {/* Related personnel (full variant only — compact rarely has room) */}
-      {!compact && detail.related_personnel.length > 0 && (
-        <Section title="Related Personnel" compact={false}>
-          <div className="card divide-y divide-slate-100">
-            {detail.related_personnel.slice(0, 8).map((p) => (
-              <div key={p.action_id} className="flex items-center justify-between px-4 py-3 text-sm">
-                <div className="min-w-0">
-                  <p className="font-medium text-slate-800 truncate">{p.person_name ?? "—"}</p>
-                  <p className="text-xs text-slate-400 truncate">
-                    {p.position}{p.department && ` · ${p.department}`}
-                  </p>
-                </div>
-                <span className="ml-3 shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold uppercase text-slate-600">
-                  {p.action_type}
-                </span>
+      {/* Votes and dollar figures quoted from the same passage.
+          Bound on transcript-chunk overlap. The previous version listed the
+          whole theme's spending sorted by amount, which put a $1.048bn
+          all-funds budget beside a home-visit partnership on most pages.
+          Empty is the normal case and the section simply disappears. */}
+      {(detail.related_votes.length > 0 || detail.related_financials.length > 0) && (
+        <div
+          className={cn(
+            !compact &&
+              detail.related_votes.length > 0 &&
+              detail.related_financials.length > 0 &&
+              "grid gap-6 sm:grid-cols-2"
+          )}
+        >
+          {detail.related_votes.length > 0 && (
+            <Section title="Votes in the same passage" compact={compact}>
+              <div className={compact ? "space-y-2" : "card divide-y divide-slate-100"}>
+                {detail.related_votes.slice(0, votesLimit).map((v) => (
+                  <div
+                    key={v.vote_id}
+                    className={compact ? "flex items-start gap-2" : "flex gap-3 px-4 py-3"}
+                  >
+                    <span
+                      className={cn(
+                        "mt-0.5 shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold leading-none",
+                        v.passed ? "bg-emerald-100 text-emerald-800" : "bg-red-100 text-red-700"
+                      )}
+                    >
+                      {compact ? (v.passed ? "PASSED" : "FAILED") : v.passed ? "✓" : "✗"}
+                    </span>
+                    <p className="line-clamp-2 flex-1 text-sm text-slate-700">{v.motion_text}</p>
+                    <SourceLink meetingId={v.meeting_id} chunkIds={v.chunk_ids} />
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
-        </Section>
+            </Section>
+          )}
+
+          {detail.related_financials.length > 0 && (
+            <Section title="Amounts cited in the same passage" compact={compact}>
+              <div className={compact ? "space-y-1.5" : "card divide-y divide-slate-100"}>
+                {detail.related_financials.slice(0, financialsLimit).map((f) => (
+                  <div
+                    key={f.item_id}
+                    className={
+                      compact
+                        ? "flex items-center justify-between gap-2"
+                        : "flex items-center justify-between gap-2 px-4 py-3"
+                    }
+                  >
+                    <p className="line-clamp-1 flex-1 text-sm text-slate-700">
+                      {f.description ?? f.vendor ?? f.category ?? "—"}
+                    </p>
+                    <span className="shrink-0 text-sm font-semibold text-slate-900">
+                      {fmtCurrency(f.amount)}
+                    </span>
+                    <SourceLink meetingId={f.meeting_id} chunkIds={f.chunk_ids} />
+                  </div>
+                ))}
+              </div>
+            </Section>
+          )}
+        </div>
       )}
 
       {/* Peer cells */}
       {detail.peer_cells.length > 0 && (
         <Section title="Same Theme at Other Colleges" compact={compact}>
+          <p className={cn("mb-2 text-slate-400", compact ? "text-[11px]" : "text-xs")}>
+            The strongest item each college recorded under this theme in the same
+            period. These are separate initiatives, not the same one compared.
+          </p>
           <div className={compact ? "space-y-2" : "grid gap-3 sm:grid-cols-2"}>
             {detail.peer_cells.map((p) => (
               <Link
                 key={p.insight_id}
                 href={`/insights/${encodeURIComponent(p.insight_id)}`}
-                className={compact
-                  ? "flex items-start gap-3 rounded-lg border border-slate-100 p-3 transition hover:border-indigo-200"
-                  : "card px-4 py-3 transition hover:border-indigo-200 hover:shadow-sm"}
+                className={
+                  compact
+                    ? "flex items-start gap-3 rounded-lg border border-slate-100 p-3 transition hover:border-indigo-200"
+                    : "card px-4 py-3 transition hover:border-indigo-200 hover:shadow-sm"
+                }
               >
                 <div className="min-w-0 flex-1">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{p.school_name}</p>
-                  <p className={cn("mt-0.5 line-clamp-2 text-slate-800", compact ? "text-sm" : "text-sm font-medium")}>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    {p.school_name}
+                  </p>
+                  <p
+                    className={cn(
+                      "mt-0.5 line-clamp-2 text-slate-800",
+                      compact ? "text-sm" : "text-sm font-medium"
+                    )}
+                  >
                     {p.label}
                   </p>
                   {!compact && (
-                    <span className={cn(
-                      "mt-2 inline-block rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase",
-                      actionTypeColor(p.action_type)
-                    )}>
-                      {p.action_type}
+                    <span className="mt-2 flex flex-wrap gap-1.5">
+                      <Badge className={actionTypeColor(p.action_type)}>{p.action_type}</Badge>
+                      <Badge className={evidenceLevelColor(p.evidence_level)}>
+                        {p.evidence_label}
+                      </Badge>
                     </span>
                   )}
                 </div>
                 {compact && (
-                  <span className={cn(
-                    "shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase",
-                    actionTypeColor(p.action_type)
-                  )}>
+                  <Badge className={cn("shrink-0", actionTypeColor(p.action_type))}>
                     {p.action_type}
-                  </span>
+                  </Badge>
                 )}
               </Link>
             ))}
@@ -234,6 +305,63 @@ export default function EvidencePanel({
   );
 }
 
+/** One of the four evidence levels. Renders nothing when the level is absent. */
+function Level({
+  term,
+  value,
+  compact,
+  hint,
+  emphasise = false,
+}: {
+  term: string;
+  value: string | null | undefined;
+  compact: boolean;
+  hint?: string;
+  emphasise?: boolean;
+}) {
+  if (!value) return null;
+  return (
+    <div>
+      <dt
+        className={cn(
+          "font-semibold uppercase tracking-wide",
+          compact ? "text-[10px]" : "text-[11px]",
+          emphasise ? "text-emerald-700" : "text-slate-400"
+        )}
+      >
+        {term}
+      </dt>
+      <dd
+        className={cn(
+          "mt-0.5 leading-relaxed text-slate-700",
+          compact ? "text-sm" : "text-base",
+          emphasise && "rounded-md bg-emerald-50/70 px-3 py-2 text-emerald-900"
+        )}
+      >
+        {value}
+        {hint && (
+          <span className={cn("mt-0.5 block text-slate-400", compact ? "text-[11px]" : "text-xs")}>
+            {hint}
+          </span>
+        )}
+      </dd>
+    </div>
+  );
+}
+
+function Badge({ className, children }: { className?: string; children: React.ReactNode }) {
+  return (
+    <span
+      className={cn(
+        "inline-block rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase",
+        className
+      )}
+    >
+      {children}
+    </span>
+  );
+}
+
 function Section({
   title,
   compact,
@@ -245,10 +373,12 @@ function Section({
 }) {
   return (
     <section>
-      <h3 className={cn(
-        "mb-2 font-semibold uppercase tracking-widest text-slate-400",
-        compact ? "text-[10px]" : "text-xs"
-      )}>
+      <h3
+        className={cn(
+          "mb-2 font-semibold uppercase tracking-widest text-slate-400",
+          compact ? "text-[10px]" : "text-xs"
+        )}
+      >
         {title}
       </h3>
       <div>{children}</div>
