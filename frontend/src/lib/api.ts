@@ -14,6 +14,7 @@ import type {
   FinancialsStats,
   InsightMatrix,
   InsightDetail,
+  PatternListResponse,
   AskResponse,
 } from "@/types";
 
@@ -174,6 +175,27 @@ function normalizeCell(value: unknown): import("@/types").InsightCell[] {
 
 export const fetchInsightDetail = (insightId: string): Promise<InsightDetail> =>
   get(`/insights/detail/${encodeURIComponent(insightId)}`);
+
+// ── Patterns ──────────────────────────────────────────────────────────────────
+
+/**
+ * Cross-college signals. The defaults are the trustee-facing ones:
+ * `needs_review=false` is the corroboration gate the pattern builder applies,
+ * and `min_schools=2` keeps a single college's own record from being presented
+ * as a pattern across institutions.
+ */
+export const fetchPatterns = (
+  { minSchools = 2, needsReview = false, limit = 50 }: {
+    minSchools?: number;
+    needsReview?: boolean;
+    limit?: number;
+  } = {}
+): Promise<PatternListResponse> =>
+  get("/patterns", {
+    min_schools: minSchools,
+    needs_review: needsReview,
+    limit,
+  });
 
 // ── Ask ───────────────────────────────────────────────────────────────────────
 

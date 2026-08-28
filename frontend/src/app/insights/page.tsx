@@ -1,5 +1,7 @@
-import { fetchInsightMatrix } from "@/lib/api";
+import { fetchInsightMatrix, fetchPatterns } from "@/lib/api";
 import InsightMatrix from "@/components/matrix/InsightMatrix";
+import PatternBand from "@/components/insights/PatternBand";
+import type { PatternRow } from "@/types";
 import { fmtDate } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
@@ -18,6 +20,15 @@ export default async function InsightsPage() {
         </p>
       </div>
     );
+  }
+
+  // The band is supporting context, not the page. A patterns outage should
+  // cost the reader the band, not the matrix.
+  let patterns: PatternRow[] = [];
+  try {
+    patterns = (await fetchPatterns()).patterns;
+  } catch {
+    patterns = [];
   }
 
   const thin = matrix.coverage.filter((c) => c.meeting_count === 0);
@@ -49,6 +60,8 @@ export default async function InsightsPage() {
           {matrix.coverage.reduce((n, c) => n + c.meeting_count, 0)}
         </span>
       </div>
+
+      <PatternBand patterns={patterns} />
 
       <InsightMatrix data={matrix} />
 

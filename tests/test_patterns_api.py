@@ -9,8 +9,9 @@ derivation, the route ordering that decides whether /patterns/summary is a
 path or a bad integer, and the response contracts that carry a signal's
 caveats alongside its claim.
 
-Query behaviour against real rows is covered by the endpoints themselves;
-this repo has no API/database fixture to hang integration tests on.
+The unit tests below need no database. The corpus checks at the end do use
+the configured one, because what a signal aggregates over is a property of the
+built table, not of the code that reads it.
 """
 from __future__ import annotations
 
@@ -159,3 +160,89 @@ def test_stats_shape():
         categories=25, max_school_count=8, extractor_versions=["v2.6"],
     )
     assert s.total == s.trustee_ready + s.needs_review
+
+
+# ── P2-2: what a signal is allowed to aggregate over ────────────────────────
+#
+# Signals are the only cross-college claim Neo makes, and the Insights page now
+# renders them above the matrix. Each check here corresponds to a defect the
+# built table actually carried.
+
+@pytest.fixture(scope="module")
+def signal_db():
+    from api.db.session import SessionLocal
+    session = SessionLocal()
+    try:
+        yield session
+    finally:
+        session.close()
+
+
+def test_no_signal_draws_on_an_archived_or_soft_deleted_meeting(signal_db):
+    """All three builders joined `meetings` for the date range and none of them
+    filtered it, so 39 `archived_old`, `is_active = FALSE` meetings fed the
+    trustee-ready signals — the same defect the Insights page fixed in its own
+    queries, but with a longer reach, because a signal claims something about
+    every college at once."""
+    from sqlalchemy import text
+
+    rows = signal_db.execute(text("""
+        SELECT DISTINCT m.meeting_id, m.status, m.is_active
+        FROM pattern_signals p
+        JOIN initiatives i ON i.initiative_id = ANY(p.supporting_initiative_ids)
+        JOIN meetings    m ON m.meeting_id    = i.meeting_id
+        WHERE m.status <> 'indexed' OR NOT m.is_active
+    """)).fetchall()
+    assert not rows, (
+        f"{len(rows)} archived or soft-deleted meetings feed pattern signals: "
+        f"{[tuple(r) for r in rows[:3]]}"
+    )
+
+
+def test_signal_date_ranges_stay_inside_the_pilot_corpus(signal_db):
+    """A signal reporting "first observed 2020-08-21" is quoting a meeting the
+    pipeline archived out of the pilot. The band states these dates on screen,
+    so an out-of-corpus one is visible to a trustee."""
+    import config
+    from sqlalchemy import text
+
+    rows = signal_db.execute(text("""
+        SELECT signal_id, category, first_observed_date, last_observed_date
+        FROM pattern_signals
+        WHERE first_observed_date IS NOT NULL
+          AND EXTRACT(YEAR FROM first_observed_date) < :cutoff
+    """), {"cutoff": config.MEETING_YEAR_CUTOFF}).fetchall()
+    assert not rows, (
+        f"signals observed before the {config.MEETING_YEAR_CUTOFF} corpus cutoff: "
+        f"{[tuple(r) for r in rows[:3]]}"
+    )
+
+
+def test_a_signal_never_starts_after_it_ends(signal_db):
+    from sqlalchemy import text
+
+    rows = signal_db.execute(text("""
+        SELECT signal_id, first_observed_date, last_observed_date
+        FROM pattern_signals
+        WHERE first_observed_date IS NOT NULL
+          AND last_observed_date IS NOT NULL
+          AND first_observed_date > last_observed_date
+    """)).fetchall()
+    assert not rows, [tuple(r) for r in rows[:3]]
+
+
+def test_trustee_ready_signals_span_at_least_two_institutions(signal_db):
+    """The band asks for min_schools=2 and needs_review=false. One college's own
+    record is not a pattern across colleges, and the gate has to hold in the
+    table as well as in the query string."""
+    from sqlalchemy import text
+
+    rows = signal_db.execute(text("""
+        SELECT signal_id, category, school_count
+        FROM pattern_signals
+        WHERE needs_review = FALSE AND school_count < 2
+    """)).fetchall()
+    assert not rows, (
+        f"trustee-ready signals from a single institution: "
+        f"{[tuple(r) for r in rows[:3]]}"
+    )

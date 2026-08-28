@@ -381,3 +381,36 @@ export interface AskResponse {
   school_slug?: string | null;
   school_name?: string | null;
 }
+
+// ── Patterns ──────────────────────────────────────────────────────────────────
+
+/**
+ * A cross-college signal from pipeline/pattern_builder.py: the same initiative
+ * category, financial category or personnel action recurring across several
+ * colleges. Signals are the only claim Neo makes that spans institutions.
+ *
+ * They cover the whole pilot corpus (2024 onwards), NOT the Insights page's
+ * rolling six-month window — so anything rendering them has to say which
+ * period it is showing, or an observation from 2024 reads as current business.
+ */
+export interface PatternRow {
+  signal_id: number;
+  signal_type: "recurring_initiative" | "budget_trend" | "personnel_trend";
+  category: string;
+  description: string;
+  school_count: number;
+  meeting_count: number;
+  first_observed_date: string | null;
+  last_observed_date: string | null;
+  confidence: number;
+  /** false = corroborated across enough institutions to show trustees. */
+  needs_review: boolean;
+  extractor_version: string | null;
+  traceable: boolean;
+  supporting_count: number;
+}
+
+export interface PatternListResponse {
+  patterns: PatternRow[];
+  pagination: Pagination;
+}
