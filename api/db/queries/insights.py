@@ -346,6 +346,22 @@ def check_theme_map() -> list[str]:
 # These three states are each defensible from data the page already holds.
 _BOARD_ACTIONS = frozenset({"approved", "launched"})
 
+# How far along the board's process each action state sits. Used only to pick
+# what one meeting contributed when several rows were extracted from it — an
+# approval and a discussion in the same session is the approval. It is not a
+# ranking of importance: "cancelled" is a decisive outcome, but it is the end
+# of a thread rather than a step along it, so it sits with the states that do
+# not advance an item.
+_ACTION_STAGE = {
+    "discussed":  1,
+    "other":      1,
+    "cancelled":  1,
+    "continued":  2,
+    "proposed":   3,
+    "approved":   4,
+    "launched":   5,
+}
+
 EVIDENCE_LEVELS = {
     "measured": (
         "Measured result reported",
@@ -474,6 +490,19 @@ class _SelectedInsight:
         if other.last_date and (self.last_date is None or other.last_date > self.last_date):
             self.last_date = other.last_date
         self.score = max(self.score, other.score)
+
+        # The action state follows the furthest-along row folded in, the same
+        # rule absorb() applies — this path did not, so a canonical row reading
+        # "discussed" kept that headline after absorbing a sibling the board had
+        # continued, and the card understated the record. "Dual-credit teacher
+        # credentialing and expansion" was headlined `discussed` while the only
+        # meeting behind it showed `continued`.
+        #
+        # The label is untouched: the caller picked this entry as canonical and
+        # the label is the insight's URL.
+        if _ACTION_STAGE.get((other.action_type or "").lower(), 0) > \
+           _ACTION_STAGE.get((self.action_type or "").lower(), 0):
+            self.action_type = other.action_type
 
     @property
     def evidence_level(self) -> str:
@@ -844,6 +873,36 @@ def get_insight_detail(db: Session, insight_id: str,
         f"Drawn from {n} board meeting{'s' if n != 1 else ''} in this period."
     )
 
+    # ── How the item moved, meeting by meeting ─────────────────────────────
+    #
+    # The card states one action state for the whole insight, taken from the
+    # strongest row folded into it. That is right for a cell but it flattens
+    # the thing a trustee most wants from a multi-meeting item: whether it
+    # was proposed and then approved, or discussed three times and never
+    # acted on. Oldest first, because a progression reads forward.
+    #
+    # Where one meeting produced several rows, the meeting contributes the
+    # furthest-along of them: a session that both discussed and approved an
+    # item approved it.
+    titles = {r.meeting_id: r.title for r in meeting_rows}
+    by_meeting: dict[int, str] = {}
+    for r in field_rows:
+        action = (r.action_type or "discussed").lower()
+        current = by_meeting.get(r.meeting_id)
+        if current is None or _ACTION_STAGE.get(action, 0) > _ACTION_STAGE.get(current, 0):
+            by_meeting[r.meeting_id] = action
+    timeline = [
+        {
+            "meeting_id":  mid,
+            "date":        str(eligible[mid].held_date),
+            "title":       titles.get(mid),
+            "action_type": action,
+        }
+        for mid, action in sorted(
+            by_meeting.items(), key=lambda kv: (eligible[kv[0]].held_date, kv[0])
+        )
+    ]
+
     # ── Evidence, from every row folded into this insight ──────────────────
     evidence_rows = db.execute(text(f"""
         SELECT e.evidence_id, e.initiative_id, e.chunk_id, e.exact_quote,
@@ -966,6 +1025,7 @@ def get_insight_detail(db: Session, insight_id: str,
         "claimed_outcome":     claimed_outcome,
         "measured_outcome":    measured_outcome,
         "why_it_appears":      why_it_appears,
+        "timeline":            timeline,
         "supporting_meetings": supporting_meetings,
         "evidence":            evidence,
         "related_votes":       related_votes,

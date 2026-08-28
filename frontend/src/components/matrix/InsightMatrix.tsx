@@ -296,7 +296,58 @@ export default function InsightMatrix({ data }: InsightMatrixProps) {
           </p>
         </div>
       ) : (
-      <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
+      <>
+      {/* Narrow screens. The matrix is a grid whose meaning is positional, and
+          at eight colleges it is 1,640px wide — on a phone that is a horizontal
+          scroller a reader has to drag through to find one column. Stacked by
+          theme instead, and empty pairs are dropped: an empty cell carries
+          meaning in the grid, where its position names the college, but a list
+          entry reading "Nothing recorded" for six colleges is just noise. */}
+      <div className="space-y-4 md:hidden">
+        {visibleThemes.map((theme) => {
+          const populated = school_slugs.filter(
+            (slug) => (theme.cells[slug] ?? []).length > 0
+          );
+          if (populated.length === 0) return null;
+          return (
+            <section
+              key={theme.theme_key}
+              className="rounded-xl border border-slate-200 bg-white p-3 shadow-sm"
+            >
+              <h3 className="mb-2 flex items-center gap-2">
+                <span
+                  className={cn(
+                    "inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-[10px] font-bold text-white",
+                    themeColor(theme.theme_key)
+                  )}
+                >
+                  {theme.theme_key}
+                </span>
+                <span className="text-sm font-medium text-slate-700">
+                  {theme.theme_label}
+                </span>
+              </h3>
+              <div className="space-y-3">
+                {populated.map((slug) => (
+                  <div key={slug}>
+                    <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                      {school_names[slug] ?? slug}
+                    </p>
+                    <MatrixCell
+                      cells={theme.cells[slug] ?? []}
+                      previewLimit={preview_limit}
+                      activeInsightId={activeCell?.insight_id ?? null}
+                      onSelect={selectCell}
+                    />
+                  </div>
+                ))}
+              </div>
+            </section>
+          );
+        })}
+      </div>
+
+      <div className="hidden overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm md:block">
         <table
           ref={tableRef}
           className="w-full border-collapse"
@@ -387,6 +438,7 @@ export default function InsightMatrix({ data }: InsightMatrixProps) {
           </tbody>
         </table>
       </div>
+      </>
       )}
 
       {/* Drawer */}

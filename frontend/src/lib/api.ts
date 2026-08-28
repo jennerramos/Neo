@@ -325,6 +325,14 @@ export const exportVotesCsvUrl = (school?: string, dateFrom?: string, dateTo?: s
   return `${BASE}/export/votes.csv?${p}`;
 };
 
+/**
+ * The Insights matrix, flattened one row per item. Takes no filters: the
+ * export carries the whole rolling window, which is the thing a board packet
+ * needs, and the endpoint reuses the page's own builder so the two cannot
+ * disagree about eligibility or ranking.
+ */
+export const exportInsightsCsvUrl = () => `${BASE}/export/insights.csv`;
+
 export const exportFinancialsCsvUrl = (school?: string, dateFrom?: string, dateTo?: string) => {
   const p = new URLSearchParams();
   if (school) p.set("school", school);

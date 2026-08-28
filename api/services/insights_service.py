@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from api.db.queries.insights import get_insight_matrix, get_insight_detail
 from api.schemas.insights import (
     InsightMatrix, ThemeRow, InsightCell, SchoolCoverage,
-    InsightDetail, EvidenceChunk, SupportingMeeting, PeerCell,
+    InsightDetail, EvidenceChunk, SupportingMeeting, TimelineStep, PeerCell,
 )
 
 
@@ -67,6 +67,7 @@ def get_detail(db: Session, insight_id: str) -> Optional[InsightDetail]:
         claimed_outcome=data["claimed_outcome"],
         measured_outcome=data["measured_outcome"],
         why_it_appears=data["why_it_appears"],
+        timeline=[TimelineStep(**t) for t in data["timeline"]],
         supporting_meetings=[SupportingMeeting(**m) for m in data["supporting_meetings"]],
         evidence=[EvidenceChunk(**e) for e in data["evidence"]],
         related_votes=data["related_votes"],

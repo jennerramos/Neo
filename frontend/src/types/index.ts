@@ -308,6 +308,14 @@ export interface PeerCell {
   insight_id: string;
 }
 
+/** One meeting's contribution to an insight, oldest first. */
+export interface TimelineStep {
+  meeting_id: number;
+  date: string;
+  title: string | null;
+  action_type: string;
+}
+
 export interface InsightDetail {
   insight_id: string;
   school_slug: string;
@@ -338,6 +346,14 @@ export interface InsightDetail {
   measured_outcome: string | null;
 
   why_it_appears: string;
+
+  /**
+   * How the item moved, meeting by meeting. A card shows one action state for
+   * the whole insight — the strongest row folded into it — which cannot say
+   * whether something was proposed and then approved or discussed three times
+   * and never acted on.
+   */
+  timeline: TimelineStep[];
 
   supporting_meetings: SupportingMeeting[];
   evidence: EvidenceChunk[];

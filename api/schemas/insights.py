@@ -112,6 +112,19 @@ class EvidenceChunk(BaseModel):
     verified:      bool = False
 
 
+class TimelineStep(BaseModel):
+    """One meeting's contribution to an insight, oldest first.
+
+    The card shows a single action state for the whole item — the strongest
+    row folded into it — which cannot show whether something was proposed and
+    then approved or merely discussed three times.
+    """
+    meeting_id:  int
+    date:        str
+    title:       Optional[str] = None
+    action_type: str
+
+
 class SupportingMeeting(BaseModel):
     meeting_id:    int
     title:         Optional[str] = None
@@ -158,6 +171,10 @@ class InsightDetail(BaseModel):
     measured_outcome:    Optional[str] = None
 
     why_it_appears:      str
+
+    # How the item moved, meeting by meeting. Single-meeting insights get a
+    # one-step timeline; the UI does not render a progression for those.
+    timeline:            List[TimelineStep] = []
 
     supporting_meetings: List[SupportingMeeting]
     evidence:            List[EvidenceChunk]

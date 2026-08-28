@@ -1,6 +1,7 @@
 import Link from "next/link";
 import type { InsightDetail } from "@/types";
 import {
+  actionTypeBar,
   actionTypeColor,
   cn,
   evidenceLevelColor,
@@ -136,6 +137,45 @@ export default function EvidencePanel({
         </Section>
       )}
 
+      {/* How the item moved. Only worth a section when there is a progression
+          to show: with one meeting the card's own action state already says
+          everything this would. */}
+      {detail.timeline.length > 1 && (
+        <Section title="How this progressed" compact={compact}>
+          <ol className="relative space-y-2.5 pl-4">
+            <span
+              className="absolute bottom-1 left-[3px] top-1 w-px bg-slate-200"
+              aria-hidden
+            />
+            {detail.timeline.map((step) => (
+              <li key={step.meeting_id} className="relative">
+                <span
+                  className={cn(
+                    "absolute -left-4 top-1 h-[7px] w-[7px] rounded-full ring-2 ring-white",
+                    actionTypeBar(step.action_type)
+                  )}
+                  aria-hidden
+                />
+                <div className="flex flex-wrap items-baseline gap-x-2">
+                  <span className="text-xs font-semibold capitalize text-slate-700">
+                    {step.action_type}
+                  </span>
+                  <span className="text-xs tabular-nums text-slate-400">
+                    {fmtDate(step.date)}
+                  </span>
+                </div>
+                <Link
+                  href={`/meetings/${step.meeting_id}`}
+                  className="text-xs text-slate-500 hover:text-indigo-700 hover:underline"
+                >
+                  {step.title ?? `Meeting ${step.meeting_id}`}
+                </Link>
+              </li>
+            ))}
+          </ol>
+        </Section>
+      )}
+
       {/* Supporting meetings — exactly the meetings that produced this insight */}
       {detail.supporting_meetings.length > 0 && (
         <Section
@@ -239,6 +279,25 @@ export default function EvidencePanel({
           )}
         </div>
       )}
+
+      {/* Ask Neo about this. The question names the college and the item, so
+          the retriever gets the two things that scope it — a bare "tell me
+          about this" would be routed against the whole corpus. The school is
+          passed separately as the request filter, not just in the prose. */}
+      <div className="pt-1">
+        <Link
+          href={`/?q=${encodeURIComponent(
+            `What has ${detail.school_name} said about ${detail.label} in its board meetings?`
+          )}&school=${encodeURIComponent(detail.school_slug)}`}
+          className={cn(
+            "inline-flex items-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50/60 px-3 py-1.5 font-medium text-indigo-700 transition hover:border-indigo-300 hover:bg-indigo-100",
+            compact ? "text-xs" : "text-sm"
+          )}
+        >
+          Ask Neo about this
+          <span aria-hidden>&rarr;</span>
+        </Link>
+      </div>
 
       {/* Peer cells */}
       {detail.peer_cells.length > 0 && (

@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 from api.db.session import SessionLocal
 from api.db.queries import insights as q
 from api.routers import insights as insights_router
+from api.routers import export as export_router
 
 
 # ── fixtures ────────────────────────────────────────────────────────────────
@@ -36,6 +37,7 @@ from api.routers import insights as insights_router
 def client() -> TestClient:
     app = FastAPI()
     app.include_router(insights_router.router)
+    app.include_router(export_router.router)
     return TestClient(app)
 
 
@@ -604,3 +606,76 @@ def test_peer_links_resolve(client: TestClient, details: dict[str, dict]):
             seen.add(p["insight_id"])
             r = client.get(f"/insights/detail/{p['insight_id']}")
             assert r.status_code == 200, f"peer link {p['insight_id']} -> {r.status_code}"
+
+
+# ── P3-3: how an item moved, meeting by meeting ─────────────────────────────
+
+def test_timeline_covers_exactly_the_supporting_meetings(details: dict[str, dict]):
+    """The timeline is the same set of meetings the count claims, one step
+    each. A step from anywhere else would be the support-inflation defect
+    coming back through a different field."""
+    for insight_id, d in details.items():
+        steps = {s["meeting_id"] for s in d["timeline"]}
+        support = {m["meeting_id"] for m in d["supporting_meetings"]}
+        assert steps == support, f"{insight_id}: {steps ^ support}"
+        assert len(d["timeline"]) == len(steps), f"{insight_id}: duplicate steps"
+
+
+def test_timeline_reads_forward(details: dict[str, dict]):
+    """Oldest first — a progression that runs backwards reads as a reversal."""
+    for insight_id, d in details.items():
+        dates = [s["date"] for s in d["timeline"]]
+        assert dates == sorted(dates), f"{insight_id}: {dates}"
+
+
+def test_every_timeline_step_is_inside_the_window(matrix: dict, details: dict[str, dict]):
+    start, end = matrix["window_start"], matrix["window_end"]
+    for insight_id, d in details.items():
+        for s in d["timeline"]:
+            assert start <= s["date"] <= end, f"{insight_id}: {s['date']}"
+
+
+def test_a_meeting_contributes_its_furthest_along_action(details: dict[str, dict]):
+    """One meeting yields one step. Where a session both discussed and approved
+    an item, the step is the approval — otherwise a progression could show an
+    approved item as merely discussed."""
+    known = {"discussed", "other", "cancelled", "continued",
+             "proposed", "approved", "launched"}
+    for insight_id, d in details.items():
+        for s in d["timeline"]:
+            assert s["action_type"] in known, f"{insight_id}: {s['action_type']}"
+
+
+def test_the_card_action_is_reached_somewhere_in_the_timeline(details: dict[str, dict]):
+    """The headline action state has to be one the record actually shows. It is
+    picked from the strongest row folded in, and every folded row belongs to a
+    meeting that has a step."""
+    for insight_id, d in details.items():
+        if not d["timeline"]:
+            continue
+        assert d["action_type"] in {s["action_type"] for s in d["timeline"]}, (
+            f"{insight_id} is headlined {d['action_type']!r} but its meetings "
+            f"show {[s['action_type'] for s in d['timeline']]}"
+        )
+
+
+# ── P3-2: the board-packet export ───────────────────────────────────────────
+
+def test_the_csv_export_carries_the_whole_window(client: TestClient, matrix: dict):
+    """A board packet needs every item, not the three a cell shows collapsed."""
+    r = client.get("/export/insights.csv")
+    assert r.status_code == 200, r.text
+    assert "text/csv" in r.headers["content-type"]
+
+    import csv as _csv, io as _io
+    rows = list(_csv.DictReader(_io.StringIO(r.text)))
+    assert len(rows) == matrix["available_count"]
+
+
+def test_the_csv_does_not_reintroduce_the_confidence_number(client: TestClient):
+    """A number in a spreadsheet column reads as a measurement, and this one
+    measured how completely the extractor filled a form."""
+    r = client.get("/export/insights.csv")
+    header = r.text.splitlines()[0].lower()
+    assert "confidence" not in header, header
+    assert "evidence_level" in header

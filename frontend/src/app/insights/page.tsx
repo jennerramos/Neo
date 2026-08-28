@@ -1,4 +1,4 @@
-import { fetchInsightMatrix, fetchPatterns } from "@/lib/api";
+import { fetchInsightMatrix, fetchPatterns, exportInsightsCsvUrl } from "@/lib/api";
 import InsightMatrix from "@/components/matrix/InsightMatrix";
 import PatternBand from "@/components/insights/PatternBand";
 import type { PatternRow } from "@/types";
@@ -35,13 +35,22 @@ export default async function InsightsPage() {
 
   return (
     <div className="space-y-6">
-      <div>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
         <h1 className="page-title">Cross-College Insights</h1>
         <p className="page-subtitle">
           What eight community-college boards have taken up in meetings held in the last{" "}
           {matrix.window_months} months. Rows are strategic themes · Columns are institutions.
           Click any item to read the transcript evidence behind it.
         </p>
+        </div>
+        <a
+          href={exportInsightsCsvUrl()}
+          className="shrink-0 rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-50"
+          download
+        >
+          &darr; Export CSV
+        </a>
       </div>
 
       {/* Coverage and window — the page used to state neither, so a reader

@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from api.db.session import get_db
 from api.db.queries.votes import list_votes
 from api.db.queries.financials import list_financials
+from api.db.queries.insights import get_insight_matrix
 
 router = APIRouter(prefix="/export", tags=["export"])
 
@@ -67,5 +68,36 @@ def export_financials_csv(
         "item_id", "school_slug", "school_name", "meeting_id",
         "meeting_title", "published_date", "action_type",
         "category", "vendor", "amount", "description", "confidence",
+    ]
+    return _stream_csv(headers, rows)
+
+
+@router.get("/insights.csv")
+def export_insights_csv(db: Session = Depends(get_db)):
+    """The Insights matrix, flattened one row per item, for board packets.
+
+    Built from get_insight_matrix so the export and the page cannot disagree
+    about the rolling window, the meeting eligibility or the ranking. It
+    carries the whole window, not the three items a cell shows collapsed.
+
+    `confidence` is deliberately absent. It measured how completely the
+    extractor filled a form, not whether a claim holds, and putting it in a
+    spreadsheet is how it would come back — a number in a CSV column reads as
+    a measurement. `evidence_level` is the defensible version.
+    """
+    matrix = get_insight_matrix(db)
+    rows = [
+        {**cell, "window_start": matrix["window_start"],
+                 "window_end":   matrix["window_end"]}
+        for theme in matrix["themes"]
+        for cells in theme["cells"].values()
+        for cell in cells
+    ]
+    headers = [
+        "insight_id", "school_slug", "school_name",
+        "theme_key", "theme_label", "label", "action_type",
+        "evidence_level", "evidence_label", "meeting_count",
+        "first_meeting_date", "last_meeting_date",
+        "window_start", "window_end",
     ]
     return _stream_csv(headers, rows)
