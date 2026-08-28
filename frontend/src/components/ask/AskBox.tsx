@@ -182,6 +182,22 @@ export default function AskBox({ hero = false, suggested = DEFAULT_SUGGESTED, sc
   // init) because sessionStorage is browser-only and Next.js renders this
   // component on the server first.
   useEffect(() => {
+    // A ?q= in the URL wins over the restored session. It means the reader
+    // arrived from somewhere that had a specific question in mind — the
+    // "Ask Neo about this" link on an insight — and restoring their previous
+    // answer over it would silently ignore the thing they just clicked.
+    const params = new URLSearchParams(window.location.search);
+    const asked = params.get("q")?.trim();
+    if (asked) {
+      const fromSchool = params.get("school") ?? "";
+      setSchool(fromSchool);
+      // Strip the query out of the URL so a refresh or a back-navigation does
+      // not silently re-run it.
+      window.history.replaceState({}, "", window.location.pathname);
+      submit(asked, fromSchool);
+      return;
+    }
+
     const persisted = loadAskState();
     if (persisted) {
       setQuery(persisted.query);
@@ -189,14 +205,20 @@ export default function AskBox({ hero = false, suggested = DEFAULT_SUGGESTED, sc
       setResult(persisted.result);
       setRestoredAt(persisted.savedAt);
     }
+    // submit is stable for this mount-only hydration; re-running on every
+    // render would re-ask the question.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Cancel any in-flight stream on unmount.
   useEffect(() => () => streamCtrlRef.current?.abort(), []);
 
-  function submit(q?: string) {
+  function submit(q?: string, schoolOverride?: string) {
     const text = (q ?? query).trim();
     if (!text) return;
+    // setSchool() from the same tick is not visible here, so a caller that
+    // sets the school and asks in one go has to pass it through.
+    const askSchool = schoolOverride ?? school;
 
     // Cancel any prior in-flight stream — otherwise its onToken callbacks
     // would continue to mutate state after we've moved on.
@@ -220,7 +242,7 @@ export default function AskBox({ hero = false, suggested = DEFAULT_SUGGESTED, sc
     let meta: Partial<AskResponse> = {};
 
     streamCtrlRef.current = askNeoStream(
-      { query: text, school_slug: school || undefined, top_k: 8 },
+      { query: text, school_slug: askSchool || undefined, top_k: 8 },
       {
         onMeta: (m) => {
           meta = m;
@@ -258,7 +280,7 @@ export default function AskBox({ hero = false, suggested = DEFAULT_SUGGESTED, sc
           setResult(finalRes);
           saveAskState({
             query:   text,
-            school,
+            school:  askSchool,
             result:  finalRes,
             savedAt: new Date().toISOString(),
           });

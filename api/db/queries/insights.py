@@ -141,12 +141,81 @@ def resolve_held_date(title: Optional[str],
 class _EligibleMeeting:
     """A meeting inside the window, with the date it was actually held."""
 
-    __slots__ = ("meeting_id", "school_slug", "held_date")
+    __slots__ = ("meeting_id", "school_slug", "held_date", "duration_seconds")
 
-    def __init__(self, meeting_id: int, school_slug: str, held_date: date):
-        self.meeting_id  = meeting_id
-        self.school_slug = school_slug
-        self.held_date   = held_date
+    def __init__(self, meeting_id: int, school_slug: str, held_date: date,
+                 duration_seconds: Optional[int]):
+        self.meeting_id       = meeting_id
+        self.school_slug      = school_slug
+        self.held_date        = held_date
+        self.duration_seconds = duration_seconds
+
+
+# ── One board session, however many times it was ingested ────────────────────
+#
+# The corpus contains the same session recorded twice. Alamo's 2026-05-12
+# special meeting is in `meetings` as 639 and 640 — same school, same date,
+# both 4,636 seconds, the titles differing only by a "Committiee"/"Committee"
+# typo — and Lone Star's 2025-10-02 tax-rate hearing is there three times
+# (45, 46, 49). Counted as recordings, two cells on the page announced "2
+# meetings" for one afternoon of board business.
+#
+# Date and school are not enough on their own: 61 same-day pairs in this corpus
+# are genuinely different meetings (a Special Meeting and a Regular Meeting on
+# one evening, a Workshop and a Special Meeting). Duration to the second is
+# what separates a second recording of one session from a second session, so a
+# meeting with no duration is never collapsed.
+#
+# The copies are re-extractions of the same transcript, and the extractor is
+# nondeterministic, so they hold overlapping-but-unequal initiative sets. The
+# richest copy is kept whole and the others dropped, rather than the union
+# being merged: a union would have to reconcile two sets of chunk ids against
+# one session and would put near-identical quotes side by side under the same
+# insight.
+def _collapse_duplicate_recordings(
+    db: Session, meetings: dict[int, _EligibleMeeting]
+) -> dict[int, _EligibleMeeting]:
+    """Keep one recording per board session."""
+    clusters: dict[tuple, list[int]] = {}
+    for m in meetings.values():
+        if m.duration_seconds is None:
+            continue    # cannot confirm it is the same session
+        clusters.setdefault(
+            (m.school_slug, m.held_date, m.duration_seconds), []).append(m.meeting_id)
+
+    duplicated = {k: v for k, v in clusters.items() if len(v) > 1}
+    if not duplicated:
+        return meetings
+
+    # Prefer the copy the extractor got the most out of, so dropping the others
+    # costs as little as possible. meeting_id breaks ties, which keeps the
+    # choice stable across requests — a cell's label becomes its URL.
+    contested = sorted({mid for ids in duplicated.values() for mid in ids})
+    ph, params = _bind_params("dup", contested)
+    counts = dict(db.execute(text(f"""
+        SELECT meeting_id, COUNT(*) AS n
+        FROM initiatives
+        WHERE meeting_id IN ({ph})
+          AND needs_review = FALSE
+        GROUP BY meeting_id
+    """), params).fetchall())
+
+    kept = dict(meetings)
+    dropped = 0
+    for key, ids in duplicated.items():
+        canonical = max(ids, key=lambda mid: (counts.get(mid, 0), -mid))
+        for mid in ids:
+            if mid != canonical:
+                del kept[mid]
+                dropped += 1
+        # Per cluster at DEBUG: this is a stable property of the corpus, and
+        # the page resolves it on every request.
+        log.debug("insights: %s on %s (%ss) ingested %d times; kept %s, dropped %s",
+                  key[0], key[1], key[2], len(ids), canonical,
+                  sorted(set(ids) - {canonical}))
+    log.info("insights: %d duplicated session(s) in window; dropped %d extra recording(s)",
+             len(duplicated), dropped)
+    return kept
 
 
 def eligible_meetings(db: Session, window_start: date,
@@ -162,7 +231,8 @@ def eligible_meetings(db: Session, window_start: date,
     it too. It only keeps the scan small.
     """
     rows = db.execute(text("""
-        SELECT m.meeting_id, s.slug AS school_slug, m.title, m.published_date
+        SELECT m.meeting_id, s.slug AS school_slug, m.title, m.published_date,
+               m.duration_seconds
         FROM meetings m
         JOIN schools s ON s.school_id = m.school_id
         WHERE m.status = 'indexed'
@@ -176,16 +246,17 @@ def eligible_meetings(db: Session, window_start: date,
         held, source = resolve_held_date(r.title, r.published_date)
         if held is None:
             unplaced += 1
-            log.info("insights: meeting %s excluded (%s): %r",
-                     r.meeting_id, source, r.title)
+            log.debug("insights: meeting %s excluded (%s): %r",
+                      r.meeting_id, source, r.title)
             continue
         if window_start <= held <= window_end:
-            out[r.meeting_id] = _EligibleMeeting(r.meeting_id, r.school_slug, held)
+            out[r.meeting_id] = _EligibleMeeting(
+                r.meeting_id, r.school_slug, held, r.duration_seconds)
 
     if unplaced:
         log.info("insights: %d of %d candidate meetings could not be dated",
                  unplaced, len(rows))
-    return out
+    return _collapse_duplicate_recordings(db, out)
 
 
 # Eligibility, written once so the matrix and the detail can never disagree.
@@ -274,6 +345,22 @@ def check_theme_map() -> list[str]:
 #
 # These three states are each defensible from data the page already holds.
 _BOARD_ACTIONS = frozenset({"approved", "launched"})
+
+# How far along the board's process each action state sits. Used only to pick
+# what one meeting contributed when several rows were extracted from it — an
+# approval and a discussion in the same session is the approval. It is not a
+# ranking of importance: "cancelled" is a decisive outcome, but it is the end
+# of a thread rather than a step along it, so it sits with the states that do
+# not advance an item.
+_ACTION_STAGE = {
+    "discussed":  1,
+    "other":      1,
+    "cancelled":  1,
+    "continued":  2,
+    "proposed":   3,
+    "approved":   4,
+    "launched":   5,
+}
 
 EVIDENCE_LEVELS = {
     "measured": (
@@ -403,6 +490,19 @@ class _SelectedInsight:
         if other.last_date and (self.last_date is None or other.last_date > self.last_date):
             self.last_date = other.last_date
         self.score = max(self.score, other.score)
+
+        # The action state follows the furthest-along row folded in, the same
+        # rule absorb() applies — this path did not, so a canonical row reading
+        # "discussed" kept that headline after absorbing a sibling the board had
+        # continued, and the card understated the record. "Dual-credit teacher
+        # credentialing and expansion" was headlined `discussed` while the only
+        # meeting behind it showed `continued`.
+        #
+        # The label is untouched: the caller picked this entry as canonical and
+        # the label is the insight's URL.
+        if _ACTION_STAGE.get((other.action_type or "").lower(), 0) > \
+           _ACTION_STAGE.get((self.action_type or "").lower(), 0):
+            self.action_type = other.action_type
 
     @property
     def evidence_level(self) -> str:
@@ -546,7 +646,12 @@ def _fetch_rows(db: Session, eligible: dict[int, _EligibleMeeting],
 
 # ── Matrix builder ───────────────────────────────────────────────────────────
 
-MAX_PER_CELL = 3
+# How many insights a cell shows before the reader asks for the rest. This is a
+# display default, not a filter: the payload carries every insight in the
+# window, because a cap here made the rest of them unreachable. There was no
+# filter, no search and no way to open a cell past its third item, so an
+# insight ranked fourth existed in the database and nowhere else.
+CELL_PREVIEW_LIMIT = 3
 
 
 def get_insight_matrix(db: Session, today: Optional[date] = None) -> dict:
@@ -590,15 +695,14 @@ def get_insight_matrix(db: Session, today: Optional[date] = None) -> dict:
             entry["latest_meeting_date"] = held
 
     theme_rows = []
-    total_shown = 0
+    total_delivered = 0
     for theme_key, theme_label in THEMES.items():
         cells: dict[str, list[dict]] = {}
         for slug in school_slugs:
             ranked = buckets.get((slug, theme_key), [])
-            shown = ranked[:MAX_PER_CELL]
-            total_shown += len(shown)
+            total_delivered += len(ranked)
             if slug in coverage:
-                coverage[slug]["insight_count"] += len(shown)
+                coverage[slug]["insight_count"] += len(ranked)
 
             cells[slug] = [
                 {
@@ -616,7 +720,7 @@ def get_insight_matrix(db: Session, today: Optional[date] = None) -> dict:
                     "evidence_label": EVIDENCE_LEVELS[e.evidence_level][0],
                     "has_detail":     True,
                 }
-                for e in shown
+                for e in ranked
             ]
 
         theme_rows.append({
@@ -635,7 +739,8 @@ def get_insight_matrix(db: Session, today: Optional[date] = None) -> dict:
         "window_start":    str(window_start),
         "window_end":      str(window_end),
         "window_months":   INSIGHTS_WINDOW_MONTHS,
-        "insight_count":   total_shown,
+        "preview_limit":   CELL_PREVIEW_LIMIT,
+        "insight_count":   total_delivered,
         "available_count": total_available,
         "coverage":        [coverage[s] for s in school_slugs if s in coverage],
     }
@@ -768,6 +873,36 @@ def get_insight_detail(db: Session, insight_id: str,
         f"Drawn from {n} board meeting{'s' if n != 1 else ''} in this period."
     )
 
+    # ── How the item moved, meeting by meeting ─────────────────────────────
+    #
+    # The card states one action state for the whole insight, taken from the
+    # strongest row folded into it. That is right for a cell but it flattens
+    # the thing a trustee most wants from a multi-meeting item: whether it
+    # was proposed and then approved, or discussed three times and never
+    # acted on. Oldest first, because a progression reads forward.
+    #
+    # Where one meeting produced several rows, the meeting contributes the
+    # furthest-along of them: a session that both discussed and approved an
+    # item approved it.
+    titles = {r.meeting_id: r.title for r in meeting_rows}
+    by_meeting: dict[int, str] = {}
+    for r in field_rows:
+        action = (r.action_type or "discussed").lower()
+        current = by_meeting.get(r.meeting_id)
+        if current is None or _ACTION_STAGE.get(action, 0) > _ACTION_STAGE.get(current, 0):
+            by_meeting[r.meeting_id] = action
+    timeline = [
+        {
+            "meeting_id":  mid,
+            "date":        str(eligible[mid].held_date),
+            "title":       titles.get(mid),
+            "action_type": action,
+        }
+        for mid, action in sorted(
+            by_meeting.items(), key=lambda kv: (eligible[kv[0]].held_date, kv[0])
+        )
+    ]
+
     # ── Evidence, from every row folded into this insight ──────────────────
     evidence_rows = db.execute(text(f"""
         SELECT e.evidence_id, e.initiative_id, e.chunk_id, e.exact_quote,
@@ -890,6 +1025,7 @@ def get_insight_detail(db: Session, insight_id: str,
         "claimed_outcome":     claimed_outcome,
         "measured_outcome":    measured_outcome,
         "why_it_appears":      why_it_appears,
+        "timeline":            timeline,
         "supporting_meetings": supporting_meetings,
         "evidence":            evidence,
         "related_votes":       related_votes,

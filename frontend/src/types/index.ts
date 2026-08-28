@@ -265,7 +265,13 @@ export interface InsightMatrix {
   window_end: string;
   window_months: number;
 
-  insight_count: number;    // cells rendered
+  /**
+   * How many insights a cell shows collapsed. A display default, not a
+   * filter — every insight in the window is delivered in `themes`.
+   */
+  preview_limit: number;
+
+  insight_count: number;    // insights delivered
   available_count: number;  // distinct insights in the window
   coverage: SchoolCoverage[];
 }
@@ -302,6 +308,14 @@ export interface PeerCell {
   insight_id: string;
 }
 
+/** One meeting's contribution to an insight, oldest first. */
+export interface TimelineStep {
+  meeting_id: number;
+  date: string;
+  title: string | null;
+  action_type: string;
+}
+
 export interface InsightDetail {
   insight_id: string;
   school_slug: string;
@@ -332,6 +346,14 @@ export interface InsightDetail {
   measured_outcome: string | null;
 
   why_it_appears: string;
+
+  /**
+   * How the item moved, meeting by meeting. A card shows one action state for
+   * the whole insight — the strongest row folded into it — which cannot say
+   * whether something was proposed and then approved or discussed three times
+   * and never acted on.
+   */
+  timeline: TimelineStep[];
 
   supporting_meetings: SupportingMeeting[];
   evidence: EvidenceChunk[];
@@ -374,4 +396,37 @@ export interface AskResponse {
   meeting_date?: string | null;
   school_slug?: string | null;
   school_name?: string | null;
+}
+
+// ── Patterns ──────────────────────────────────────────────────────────────────
+
+/**
+ * A cross-college signal from pipeline/pattern_builder.py: the same initiative
+ * category, financial category or personnel action recurring across several
+ * colleges. Signals are the only claim Neo makes that spans institutions.
+ *
+ * They cover the whole pilot corpus (2024 onwards), NOT the Insights page's
+ * rolling six-month window — so anything rendering them has to say which
+ * period it is showing, or an observation from 2024 reads as current business.
+ */
+export interface PatternRow {
+  signal_id: number;
+  signal_type: "recurring_initiative" | "budget_trend" | "personnel_trend";
+  category: string;
+  description: string;
+  school_count: number;
+  meeting_count: number;
+  first_observed_date: string | null;
+  last_observed_date: string | null;
+  confidence: number;
+  /** false = corroborated across enough institutions to show trustees. */
+  needs_review: boolean;
+  extractor_version: string | null;
+  traceable: boolean;
+  supporting_count: number;
+}
+
+export interface PatternListResponse {
+  patterns: PatternRow[];
+  pagination: Pagination;
 }

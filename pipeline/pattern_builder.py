@@ -45,16 +45,26 @@ from database.models import (
     PersonnelAction,
 )
 
-# v2.6 — signals are now built from evidence-backed initiatives, date ranges
-# come from meeting dates rather than extraction time, and the two-school
-# measured-outcome rule is actually enforced.  Bump whenever signal semantics
-# change: a version that does not move makes old and new signals
-# indistinguishable in the same table.
-EXTRACTOR_VERSION = "v2.6"
+# v2.7 — signals are restricted to meetings still in the pilot corpus. v2.6
+# built them from evidence-backed initiatives, took date ranges from meeting
+# dates rather than extraction time, and enforced the two-school
+# measured-outcome rule.  Bump whenever signal semantics change: a version that
+# does not move makes old and new signals indistinguishable in the same table.
+EXTRACTOR_VERSION = "v2.7"
 
 # A signal may not be presented as trustee-ready unless measured outcomes come
 # from at least this many DIFFERENT institutions.
 MIN_MEASURED_SCHOOLS = 2
+
+# Every builder below joins `meetings` for the date range, and none of them
+# filtered it. Signals therefore aggregated over recordings the pipeline had
+# already archived out of the pilot: 39 `archived_old`, `is_active = FALSE`
+# meetings fed the trustee-ready signals, which is what put first-observed
+# dates of 2020-08-21 and 2021-06-07 on them when the corpus cutoff is 2024+
+# (config.MEETING_YEAR_CUTOFF). The Insights page fixed the same defect in its
+# own queries; unfixed here it has a longer reach, because a signal makes a
+# cross-college claim.
+_IN_PILOT_CORPUS = (Meeting.status == "indexed", Meeting.is_active)
 
 # How many school names to list before collapsing into "+N more".
 _MAX_NAMED_SCHOOLS = 3
@@ -156,6 +166,7 @@ def _build_recurring_initiative_signals(session, min_schools: int) -> list[dict]
             func.array_agg(distinct(Initiative.initiative_id)).label("initiative_ids"),
         )
         .join(Meeting, Meeting.meeting_id == Initiative.meeting_id)
+        .filter(*_IN_PILOT_CORPUS)
         .filter(Initiative.needs_review == False)     # noqa: E712
         .filter(Initiative.confidence >= 0.5)
         .filter(has_evidence)
@@ -232,6 +243,7 @@ def _build_budget_trend_signals(session, min_schools: int) -> list[dict]:
             func.array_agg(distinct(FinancialItem.school_slug)).label("school_slugs"),
         )
         .join(Meeting, Meeting.meeting_id == FinancialItem.meeting_id)
+        .filter(*_IN_PILOT_CORPUS)
         .filter(FinancialItem.action_type == "approved")
         .filter(FinancialItem.needs_review == False)    # noqa: E712
         .filter(FinancialItem.confidence >= 0.5)
@@ -286,6 +298,7 @@ def _build_personnel_trend_signals(session, min_schools: int) -> list[dict]:
             func.array_agg(distinct(PersonnelAction.school_slug)).label("school_slugs"),
         )
         .join(Meeting, Meeting.meeting_id == PersonnelAction.meeting_id)
+        .filter(*_IN_PILOT_CORPUS)
         .filter(PersonnelAction.needs_review == False)     # noqa: E712
         .filter(PersonnelAction.confidence >= 0.5)
         .group_by(PersonnelAction.action_type)

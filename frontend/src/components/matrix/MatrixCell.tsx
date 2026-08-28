@@ -1,9 +1,12 @@
 "use client";
+import { useState } from "react";
 import type { InsightCell } from "@/types";
 import { actionTypeBorder, cn, fmtDate } from "@/lib/utils";
 
 interface MatrixCellProps {
   cells: InsightCell[];
+  /** How many to show before "+N more". The rest are already loaded. */
+  previewLimit?: number;
   /** The currently selected insight id, if any (for highlighting). */
   activeInsightId?: string | null;
   /** Called when any individual insight in this cell is clicked. */
@@ -45,8 +48,20 @@ function EvidenceMark({ level }: { level: InsightCell["evidence_level"] }) {
  *
  * Every row also carries its meeting date. The matrix previously showed no
  * date anywhere, which let an item from a 2021 meeting read as current.
+ *
+ * A cell shows `previewLimit` items collapsed. The rest are already in the
+ * payload — the API stopped truncating cells, because a cap there left half
+ * the window's insights with no route to them at all.
  */
-export default function MatrixCell({ cells, activeInsightId, onSelect, onHover }: MatrixCellProps) {
+export default function MatrixCell({
+  cells,
+  previewLimit = 3,
+  activeInsightId,
+  onSelect,
+  onHover,
+}: MatrixCellProps) {
+  const [expanded, setExpanded] = useState(false);
+
   if (cells.length === 0) {
     return (
       <div
@@ -62,12 +77,15 @@ export default function MatrixCell({ cells, activeInsightId, onSelect, onHover }
     );
   }
 
+  const hiddenCount = Math.max(0, cells.length - previewLimit);
+  const visible = expanded ? cells : cells.slice(0, previewLimit);
+
   return (
     <div
       onMouseEnter={onHover}
       className="flex h-full min-h-[88px] flex-col divide-y divide-slate-100 overflow-hidden rounded-lg border border-slate-200 bg-white"
     >
-      {cells.map((cell) => {
+      {visible.map((cell) => {
         const active = cell.insight_id === activeInsightId;
         const spansMultiple =
           cell.meeting_count > 1 &&
@@ -122,6 +140,16 @@ export default function MatrixCell({ cells, activeInsightId, onSelect, onHover }
           </button>
         );
       })}
+
+      {hiddenCount > 0 && (
+        <button
+          onClick={() => setExpanded((v) => !v)}
+          aria-expanded={expanded}
+          className="w-full bg-slate-50/80 px-2.5 py-1.5 text-[10px] font-semibold text-slate-500 transition-colors hover:bg-indigo-50 hover:text-indigo-700 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-400"
+        >
+          {expanded ? "Show fewer" : `+${hiddenCount} more`}
+        </button>
+      )}
     </div>
   );
 }

@@ -53,8 +53,9 @@ class InsightCell(BaseModel):
 class ThemeRow(BaseModel):
     theme_key:   str
     theme_label: str
-    # school_slug → list of initiatives for that (theme × school). Empty list = no signal.
-    # Up to 3 cells per (school × theme) to surface related initiatives in one place.
+    # school_slug → every initiative for that (theme × school), ranked
+    # strongest first. Empty list = no signal. Not truncated: the page shows
+    # `preview_limit` of them collapsed and the reader can open the rest.
     cells:       Dict[str, List[InsightCell]]
 
 
@@ -85,7 +86,11 @@ class InsightMatrix(BaseModel):
     window_end:    str
     window_months: int
 
-    insight_count:   int                   # cells rendered
+    # How many insights a cell shows collapsed. A display default, not a
+    # filter — every insight in the window is delivered.
+    preview_limit:   int
+
+    insight_count:   int                   # insights delivered
     available_count: int                   # distinct insights in the window
     coverage:        List[SchoolCoverage]
 
@@ -105,6 +110,19 @@ class EvidenceChunk(BaseModel):
     chunk_id:      Optional[str] = None
     supports:      List[str] = []
     verified:      bool = False
+
+
+class TimelineStep(BaseModel):
+    """One meeting's contribution to an insight, oldest first.
+
+    The card shows a single action state for the whole item — the strongest
+    row folded into it — which cannot show whether something was proposed and
+    then approved or merely discussed three times.
+    """
+    meeting_id:  int
+    date:        str
+    title:       Optional[str] = None
+    action_type: str
 
 
 class SupportingMeeting(BaseModel):
@@ -153,6 +171,10 @@ class InsightDetail(BaseModel):
     measured_outcome:    Optional[str] = None
 
     why_it_appears:      str
+
+    # How the item moved, meeting by meeting. Single-meeting insights get a
+    # one-step timeline; the UI does not render a progression for those.
+    timeline:            List[TimelineStep] = []
 
     supporting_meetings: List[SupportingMeeting]
     evidence:            List[EvidenceChunk]

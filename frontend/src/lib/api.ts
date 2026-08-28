@@ -14,6 +14,7 @@ import type {
   FinancialsStats,
   InsightMatrix,
   InsightDetail,
+  PatternListResponse,
   AskResponse,
 } from "@/types";
 
@@ -175,6 +176,27 @@ function normalizeCell(value: unknown): import("@/types").InsightCell[] {
 export const fetchInsightDetail = (insightId: string): Promise<InsightDetail> =>
   get(`/insights/detail/${encodeURIComponent(insightId)}`);
 
+// ── Patterns ──────────────────────────────────────────────────────────────────
+
+/**
+ * Cross-college signals. The defaults are the trustee-facing ones:
+ * `needs_review=false` is the corroboration gate the pattern builder applies,
+ * and `min_schools=2` keeps a single college's own record from being presented
+ * as a pattern across institutions.
+ */
+export const fetchPatterns = (
+  { minSchools = 2, needsReview = false, limit = 50 }: {
+    minSchools?: number;
+    needsReview?: boolean;
+    limit?: number;
+  } = {}
+): Promise<PatternListResponse> =>
+  get("/patterns", {
+    min_schools: minSchools,
+    needs_review: needsReview,
+    limit,
+  });
+
 // ── Ask ───────────────────────────────────────────────────────────────────────
 
 export interface AskRequest {
@@ -302,6 +324,14 @@ export const exportVotesCsvUrl = (school?: string, dateFrom?: string, dateTo?: s
   if (dateTo) p.set("date_to", dateTo);
   return `${BASE}/export/votes.csv?${p}`;
 };
+
+/**
+ * The Insights matrix, flattened one row per item. Takes no filters: the
+ * export carries the whole rolling window, which is the thing a board packet
+ * needs, and the endpoint reuses the page's own builder so the two cannot
+ * disagree about eligibility or ranking.
+ */
+export const exportInsightsCsvUrl = () => `${BASE}/export/insights.csv`;
 
 export const exportFinancialsCsvUrl = (school?: string, dateFrom?: string, dateTo?: string) => {
   const p = new URLSearchParams();

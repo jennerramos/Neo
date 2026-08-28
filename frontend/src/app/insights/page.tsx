@@ -1,5 +1,7 @@
-import { fetchInsightMatrix } from "@/lib/api";
+import { fetchInsightMatrix, fetchPatterns, exportInsightsCsvUrl } from "@/lib/api";
 import InsightMatrix from "@/components/matrix/InsightMatrix";
+import PatternBand from "@/components/insights/PatternBand";
+import type { PatternRow } from "@/types";
 import { fmtDate } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
@@ -20,17 +22,35 @@ export default async function InsightsPage() {
     );
   }
 
+  // The band is supporting context, not the page. A patterns outage should
+  // cost the reader the band, not the matrix.
+  let patterns: PatternRow[] = [];
+  try {
+    patterns = (await fetchPatterns()).patterns;
+  } catch {
+    patterns = [];
+  }
+
   const thin = matrix.coverage.filter((c) => c.meeting_count === 0);
 
   return (
     <div className="space-y-6">
-      <div>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
         <h1 className="page-title">Cross-College Insights</h1>
         <p className="page-subtitle">
           What eight community-college boards have taken up in meetings held in the last{" "}
           {matrix.window_months} months. Rows are strategic themes · Columns are institutions.
           Click any item to read the transcript evidence behind it.
         </p>
+        </div>
+        <a
+          href={exportInsightsCsvUrl()}
+          className="shrink-0 rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-50"
+          download
+        >
+          &darr; Export CSV
+        </a>
       </div>
 
       {/* Coverage and window — the page used to state neither, so a reader
@@ -41,14 +61,16 @@ export default async function InsightsPage() {
           {fmtDate(matrix.window_start)} – {fmtDate(matrix.window_end)}
         </span>
         <span>
-          <span className="font-semibold text-slate-800">Showing</span> the top {matrix.insight_count} of{" "}
-          {matrix.available_count} items recorded in this period
+          <span className="font-semibold text-slate-800">Items recorded</span>{" "}
+          {matrix.available_count}
         </span>
         <span>
           <span className="font-semibold text-slate-800">Meetings analysed</span>{" "}
           {matrix.coverage.reduce((n, c) => n + c.meeting_count, 0)}
         </span>
       </div>
+
+      <PatternBand patterns={patterns} />
 
       <InsightMatrix data={matrix} />
 
@@ -108,7 +130,7 @@ export default async function InsightsPage() {
               <tr className="text-slate-400">
                 <th className="px-4 py-2 text-left font-medium">College</th>
                 <th className="px-4 py-2 text-right font-medium">Meetings analysed</th>
-                <th className="px-4 py-2 text-right font-medium">Items shown</th>
+                <th className="px-4 py-2 text-right font-medium">Items</th>
                 <th className="px-4 py-2 text-right font-medium">Most recent meeting</th>
               </tr>
             </thead>
