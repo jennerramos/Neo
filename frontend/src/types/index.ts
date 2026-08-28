@@ -265,7 +265,13 @@ export interface InsightMatrix {
   window_end: string;
   window_months: number;
 
-  insight_count: number;    // cells rendered
+  /**
+   * How many insights a cell shows collapsed. A display default, not a
+   * filter — every insight in the window is delivered in `themes`.
+   */
+  preview_limit: number;
+
+  insight_count: number;    // insights delivered
   available_count: number;  // distinct insights in the window
   coverage: SchoolCoverage[];
 }

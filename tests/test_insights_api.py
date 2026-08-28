@@ -249,6 +249,64 @@ def test_matrix_reports_the_window_it_covers(matrix: dict):
     assert matrix["insight_count"] <= matrix["available_count"]
 
 
+# ── P2-1: everything in the window is reachable ─────────────────────────────
+
+def test_every_insight_in_the_window_is_delivered(matrix: dict, cells: list[dict]):
+    """Cells were truncated to the top three, and the page had no filter, no
+    search and no way to open a cell past its third item — so an insight
+    ranked fourth existed in the database and nowhere a reader could get to."""
+    assert matrix["insight_count"] == matrix["available_count"], (
+        f"{matrix['available_count'] - matrix['insight_count']} insights in the "
+        f"window are not in the payload"
+    )
+    assert len(cells) == matrix["available_count"]
+
+
+def test_the_preview_limit_is_a_display_default_not_a_cap(matrix: dict):
+    """`preview_limit` tells the page what to collapse to. It must not be what
+    the API sends, or the cap is simply back."""
+    limit = matrix["preview_limit"]
+    assert limit >= 1
+    biggest = max(
+        (len(group) for t in matrix["themes"] for group in t["cells"].values()),
+        default=0,
+    )
+    assert biggest > limit, (
+        "no cell exceeds the preview limit, so this corpus cannot show whether "
+        "the payload is still being truncated"
+    )
+
+
+def test_every_delivered_insight_is_reachable_by_filtering(cells: list[dict]):
+    """The filter bar narrows by college, theme, action, evidence, date and
+    free text. Every item has to survive at least the filter combination that
+    describes it, or it is on the page but unreachable."""
+    for c in cells:
+        assert c["school_slug"] and c["theme_key"], c["insight_id"]
+        assert c["action_type"], c["insight_id"]
+        assert c["evidence_level"] in {"measured", "action", "discussion"}, c["insight_id"]
+        # The date filter compares against the span the insight covers.
+        assert c["first_meeting_date"] and c["last_meeting_date"], c["insight_id"]
+        assert c["first_meeting_date"] <= c["last_meeting_date"], c["insight_id"]
+        # Free-text search reads label, school name, theme label and action.
+        assert (c["label"] or "").strip(), c["insight_id"]
+
+
+def test_coverage_counts_every_item_not_just_the_visible_ones(
+    matrix: dict, cells: list[dict]
+):
+    """The coverage table's per-college count came from the truncated set, so
+    it under-reported every college with a busy theme."""
+    per_school: dict[str, int] = {}
+    for c in cells:
+        per_school[c["school_slug"]] = per_school.get(c["school_slug"], 0) + 1
+    for row in matrix["coverage"]:
+        assert row["insight_count"] == per_school.get(row["school_slug"], 0), (
+            f"{row['school_slug']} coverage says {row['insight_count']}, "
+            f"payload has {per_school.get(row['school_slug'], 0)}"
+        )
+
+
 def test_no_displayed_insight_predates_the_window(matrix: dict, cells: list[dict]):
     start = matrix["window_start"]
     stale = [c for c in cells if (c["first_meeting_date"] or "") < start]

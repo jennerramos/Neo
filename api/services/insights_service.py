@@ -35,6 +35,7 @@ def build_matrix(db: Session) -> InsightMatrix:
         window_start=data["window_start"],
         window_end=data["window_end"],
         window_months=data["window_months"],
+        preview_limit=data["preview_limit"],
         insight_count=data["insight_count"],
         available_count=data["available_count"],
         coverage=[SchoolCoverage(**c) for c in data["coverage"]],

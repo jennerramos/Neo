@@ -41,8 +41,8 @@ export default async function InsightsPage() {
           {fmtDate(matrix.window_start)} – {fmtDate(matrix.window_end)}
         </span>
         <span>
-          <span className="font-semibold text-slate-800">Showing</span> the top {matrix.insight_count} of{" "}
-          {matrix.available_count} items recorded in this period
+          <span className="font-semibold text-slate-800">Items recorded</span>{" "}
+          {matrix.available_count}
         </span>
         <span>
           <span className="font-semibold text-slate-800">Meetings analysed</span>{" "}
@@ -108,7 +108,7 @@ export default async function InsightsPage() {
               <tr className="text-slate-400">
                 <th className="px-4 py-2 text-left font-medium">College</th>
                 <th className="px-4 py-2 text-right font-medium">Meetings analysed</th>
-                <th className="px-4 py-2 text-right font-medium">Items shown</th>
+                <th className="px-4 py-2 text-right font-medium">Items</th>
                 <th className="px-4 py-2 text-right font-medium">Most recent meeting</th>
               </tr>
             </thead>

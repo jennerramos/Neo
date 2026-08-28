@@ -617,7 +617,12 @@ def _fetch_rows(db: Session, eligible: dict[int, _EligibleMeeting],
 
 # ── Matrix builder ───────────────────────────────────────────────────────────
 
-MAX_PER_CELL = 3
+# How many insights a cell shows before the reader asks for the rest. This is a
+# display default, not a filter: the payload carries every insight in the
+# window, because a cap here made the rest of them unreachable. There was no
+# filter, no search and no way to open a cell past its third item, so an
+# insight ranked fourth existed in the database and nowhere else.
+CELL_PREVIEW_LIMIT = 3
 
 
 def get_insight_matrix(db: Session, today: Optional[date] = None) -> dict:
@@ -661,15 +666,14 @@ def get_insight_matrix(db: Session, today: Optional[date] = None) -> dict:
             entry["latest_meeting_date"] = held
 
     theme_rows = []
-    total_shown = 0
+    total_delivered = 0
     for theme_key, theme_label in THEMES.items():
         cells: dict[str, list[dict]] = {}
         for slug in school_slugs:
             ranked = buckets.get((slug, theme_key), [])
-            shown = ranked[:MAX_PER_CELL]
-            total_shown += len(shown)
+            total_delivered += len(ranked)
             if slug in coverage:
-                coverage[slug]["insight_count"] += len(shown)
+                coverage[slug]["insight_count"] += len(ranked)
 
             cells[slug] = [
                 {
@@ -687,7 +691,7 @@ def get_insight_matrix(db: Session, today: Optional[date] = None) -> dict:
                     "evidence_label": EVIDENCE_LEVELS[e.evidence_level][0],
                     "has_detail":     True,
                 }
-                for e in shown
+                for e in ranked
             ]
 
         theme_rows.append({
@@ -706,7 +710,8 @@ def get_insight_matrix(db: Session, today: Optional[date] = None) -> dict:
         "window_start":    str(window_start),
         "window_end":      str(window_end),
         "window_months":   INSIGHTS_WINDOW_MONTHS,
-        "insight_count":   total_shown,
+        "preview_limit":   CELL_PREVIEW_LIMIT,
+        "insight_count":   total_delivered,
         "available_count": total_available,
         "coverage":        [coverage[s] for s in school_slugs if s in coverage],
     }

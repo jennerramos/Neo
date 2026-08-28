@@ -53,8 +53,9 @@ class InsightCell(BaseModel):
 class ThemeRow(BaseModel):
     theme_key:   str
     theme_label: str
-    # school_slug → list of initiatives for that (theme × school). Empty list = no signal.
-    # Up to 3 cells per (school × theme) to surface related initiatives in one place.
+    # school_slug → every initiative for that (theme × school), ranked
+    # strongest first. Empty list = no signal. Not truncated: the page shows
+    # `preview_limit` of them collapsed and the reader can open the rest.
     cells:       Dict[str, List[InsightCell]]
 
 
@@ -85,7 +86,11 @@ class InsightMatrix(BaseModel):
     window_end:    str
     window_months: int
 
-    insight_count:   int                   # cells rendered
+    # How many insights a cell shows collapsed. A display default, not a
+    # filter — every insight in the window is delivered.
+    preview_limit:   int
+
+    insight_count:   int                   # insights delivered
     available_count: int                   # distinct insights in the window
     coverage:        List[SchoolCoverage]
 
