@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from api.db.queries.insights import get_insight_matrix, get_insight_detail
 from api.schemas.insights import (
-    InsightMatrix, ThemeRow, InsightCell,
+    InsightMatrix, ThemeRow, InsightCell, SchoolCoverage,
     InsightDetail, EvidenceChunk, SupportingMeeting, PeerCell,
 )
 
@@ -16,7 +16,8 @@ def build_matrix(db: Session) -> InsightMatrix:
     theme_rows = []
     for t in data["themes"]:
         # Each (school × theme) cell is a list of up to 3 initiatives,
-        # ranked by confidence then meeting_count. Empty list = no signal.
+        # ranked by evidence strength then recency. Empty list = no signal
+        # in the rolling window.
         cells: dict = {}
         for slug, cell_list in t["cells"].items():
             cells[slug] = [InsightCell(**c) for c in (cell_list or [])]
@@ -31,6 +32,12 @@ def build_matrix(db: Session) -> InsightMatrix:
         school_names=data["school_names"],
         themes=theme_rows,
         generated_at=data["generated_at"],
+        window_start=data["window_start"],
+        window_end=data["window_end"],
+        window_months=data["window_months"],
+        insight_count=data["insight_count"],
+        available_count=data["available_count"],
+        coverage=[SchoolCoverage(**c) for c in data["coverage"]],
     )
 
 
@@ -46,13 +53,22 @@ def get_detail(db: Session, insight_id: str) -> Optional[InsightDetail]:
         theme_label=data["theme_label"],
         label=data["label"],
         action_type=data["action_type"],
+        evidence_level=data["evidence_level"],
+        evidence_label=data["evidence_label"],
+        evidence_note=data["evidence_note"],
+        meeting_count=data["meeting_count"],
+        first_meeting_date=data["first_meeting_date"],
+        last_meeting_date=data["last_meeting_date"],
         summary=data["summary"],
+        description=data["description"],
+        observed_action=data["observed_action"],
+        stated_rationale=data["stated_rationale"],
+        claimed_outcome=data["claimed_outcome"],
+        measured_outcome=data["measured_outcome"],
         why_it_appears=data["why_it_appears"],
-        confidence=data["confidence"],
         supporting_meetings=[SupportingMeeting(**m) for m in data["supporting_meetings"]],
         evidence=[EvidenceChunk(**e) for e in data["evidence"]],
         related_votes=data["related_votes"],
         related_financials=data["related_financials"],
-        related_personnel=data["related_personnel"],
         peer_cells=[PeerCell(**p) for p in data["peer_cells"]],
     )

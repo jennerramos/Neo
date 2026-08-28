@@ -193,6 +193,18 @@ export interface FinancialsStats {
 
 // ── Insights ──────────────────────────────────────────────────────────────────
 
+export type EvidenceLevel = "measured" | "action" | "discussion";
+
+// The Insights detail carries `meeting_id` and `chunk_ids` on its related rows
+// so each one can deep-link to the transcript passage it was quoted from.
+// VoteSummary / FinancialSummary are shared with the meetings overview, so
+// they are widened here instead of being changed underneath that page.
+export type InsightRelatedVote = VoteSummary &
+  Pick<Vote, "meeting_id" | "chunk_ids">;
+
+export type InsightRelatedFinancial = FinancialSummary &
+  Pick<Financial, "meeting_id" | "chunk_ids">;
+
 export interface InsightCell {
   insight_id: string;
   school_slug: string;
@@ -202,7 +214,19 @@ export interface InsightCell {
   label: string;
   action_type: string;
   meeting_count: number;
-  confidence: number;
+
+  /** Dates the insight actually covers — the matrix used to carry none. */
+  first_meeting_date: string | null;
+  last_meeting_date: string | null;
+
+  /**
+   * Replaces `confidence`. That float was extraction form-completeness and
+   * rendered as "100% confidence", which reads as a truth claim it could not
+   * support. The API no longer serializes it at all.
+   */
+  evidence_level: EvidenceLevel;
+  evidence_label: string;
+
   has_detail: boolean;
 }
 
@@ -219,11 +243,31 @@ export interface ThemeRow {
   cells: Record<string, InsightCell[]>;
 }
 
+export interface SchoolCoverage {
+  school_slug: string;
+  school_name: string;
+  meeting_count: number;
+  latest_meeting_date: string | null;
+  insight_count: number;
+}
+
 export interface InsightMatrix {
   school_slugs: string[];
   school_names: Record<string, string>;
   themes: ThemeRow[];
   generated_at: string;
+
+  /**
+   * The rolling window the page covers, so it can say so on screen. Measured
+   * on the date the board met, not the date the recording was uploaded.
+   */
+  window_start: string;
+  window_end: string;
+  window_months: number;
+
+  insight_count: number;    // cells rendered
+  available_count: number;  // distinct insights in the window
+  coverage: SchoolCoverage[];
 }
 
 export interface EvidenceChunk {
@@ -253,6 +297,8 @@ export interface PeerCell {
   school_name: string;
   label: string;
   action_type: string;
+  evidence_level: EvidenceLevel;
+  evidence_label: string;
   insight_id: string;
 }
 
@@ -264,14 +310,40 @@ export interface InsightDetail {
   theme_label: string;
   label: string;
   action_type: string;
+
+  evidence_level: EvidenceLevel;
+  evidence_label: string;
+  evidence_note: string;
+
+  meeting_count: number;
+  first_meeting_date: string | null;
+  last_meeting_date: string | null;
+
+  /**
+   * The extractor keeps four evidence levels deliberately apart. They stay
+   * apart here: a claimed outcome is a prediction the college made and must
+   * not read as a result. The API used to concatenate all four into `summary`.
+   */
   summary: string;
+  description: string | null;
+  observed_action: string | null;
+  stated_rationale: string | null;
+  claimed_outcome: string | null;
+  measured_outcome: string | null;
+
   why_it_appears: string;
-  confidence: number;
+
   supporting_meetings: SupportingMeeting[];
   evidence: EvidenceChunk[];
-  related_votes: VoteSummary[];
-  related_financials: FinancialSummary[];
-  related_personnel: PersonnelSummary[];
+
+  /**
+   * Rows quoted from the same transcript passage as this insight — not
+   * everything in the theme. Empty is normal and means the passage cited no
+   * vote or dollar figure.
+   */
+  related_votes: InsightRelatedVote[];
+  related_financials: InsightRelatedFinancial[];
+
   peer_cells: PeerCell[];
 }
 

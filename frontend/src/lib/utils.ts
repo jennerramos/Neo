@@ -9,9 +9,24 @@ export function fmtCurrency(amount: number | null | undefined): string {
   }).format(amount);
 }
 
+/**
+ * Format a meeting date for display.
+ *
+ * The API sends calendar dates as "YYYY-MM-DD". `new Date("2026-02-27")`
+ * parses that as *UTC midnight*, and `toLocaleDateString` then renders it in
+ * the viewer's zone — so every viewer west of UTC, which is every NEO user,
+ * saw each board meeting dated one day early. Date-only strings are split and
+ * rebuilt as a local date so a meeting keeps the date it happened on.
+ * Timestamps that carry a zone are left to the normal parser.
+ */
 export function fmtDate(dateStr: string | null | undefined): string {
   if (!dateStr) return "—";
-  return new Date(dateStr).toLocaleDateString("en-US", {
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr.trim());
+  const d = dateOnly
+    ? new Date(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]))
+    : new Date(dateStr);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString("en-US", {
     year: "numeric",
     month: "short",
     day: "numeric",
@@ -30,40 +45,54 @@ export function fmtConfidence(score: number | null | undefined): string {
   return `${Math.round(score * 100)}%`;
 }
 
+// The extractor emits seven action types (initiative_extractor._ACTION_TYPES).
+// The maps below cover all seven. They used to stop at five, so "other" and
+// "cancelled" fell through the ?? and rendered in the same grey as
+// "discussed" — a cancelled item was indistinguishable from a debated one,
+// and neither appeared in the page legend.
+const ACTION_BADGE: Record<string, string> = {
+  approved:  "bg-emerald-100 text-emerald-800",
+  launched:  "bg-blue-100 text-blue-800",
+  proposed:  "bg-amber-100 text-amber-800",
+  discussed: "bg-slate-100 text-slate-700",
+  continued: "bg-purple-100 text-purple-800",
+  cancelled: "bg-red-100 text-red-800",
+  other:     "bg-stone-100 text-stone-700",
+};
+
+const ACTION_ACCENT: Record<string, string> = {
+  approved:  "bg-emerald-400",
+  launched:  "bg-blue-400",
+  proposed:  "bg-amber-400",
+  discussed: "bg-slate-300",
+  continued: "bg-purple-400",
+  cancelled: "bg-red-400",
+  other:     "bg-stone-400",
+};
+
+const ACTION_BORDER: Record<string, string> = {
+  approved:  "border-l-emerald-400",
+  launched:  "border-l-blue-400",
+  proposed:  "border-l-amber-400",
+  discussed: "border-l-slate-300",
+  continued: "border-l-purple-400",
+  cancelled: "border-l-red-400",
+  other:     "border-l-stone-400",
+};
+
 /** Action type → Tailwind badge colour */
 export function actionTypeColor(action: string): string {
-  const map: Record<string, string> = {
-    approved:  "bg-emerald-100 text-emerald-800",
-    launched:  "bg-blue-100 text-blue-800",
-    proposed:  "bg-amber-100 text-amber-800",
-    discussed: "bg-slate-100 text-slate-700",
-    continued: "bg-purple-100 text-purple-800",
-  };
-  return map[action?.toLowerCase()] ?? "bg-slate-100 text-slate-700";
+  return ACTION_BADGE[action?.toLowerCase()] ?? "bg-slate-100 text-slate-700";
 }
 
 /** Action type → solid accent colour (for bars, dots, left-borders). */
 export function actionTypeBar(action: string): string {
-  const map: Record<string, string> = {
-    approved:  "bg-emerald-400",
-    launched:  "bg-blue-400",
-    proposed:  "bg-amber-400",
-    discussed: "bg-slate-300",
-    continued: "bg-purple-400",
-  };
-  return map[action?.toLowerCase()] ?? "bg-slate-300";
+  return ACTION_ACCENT[action?.toLowerCase()] ?? "bg-slate-300";
 }
 
 /** Action type → left-border utility class (matches actionTypeBar colours). */
 export function actionTypeBorder(action: string): string {
-  const map: Record<string, string> = {
-    approved:  "border-l-emerald-400",
-    launched:  "border-l-blue-400",
-    proposed:  "border-l-amber-400",
-    discussed: "border-l-slate-300",
-    continued: "border-l-purple-400",
-  };
-  return map[action?.toLowerCase()] ?? "border-l-slate-300";
+  return ACTION_BORDER[action?.toLowerCase()] ?? "border-l-slate-300";
 }
 
 /** Theme key → accent colour for matrix header */
@@ -75,9 +104,27 @@ export function themeColor(key: string): string {
     T4: "bg-violet-600",
     T5: "bg-rose-600",
     T6: "bg-amber-600",
-    T7: "bg-slate-500",
+    T7: "bg-slate-600",
+    T8: "bg-slate-500",
   };
   return map[key] ?? "bg-slate-500";
+}
+
+/**
+ * Evidence strength → badge colour.
+ *
+ * This replaces the confidence percentage on the Insights page. The old badge
+ * read "100% confidence" but the number measured extraction form-completeness,
+ * not whether the claim held, so it invited exactly the reading it could not
+ * support. These three states are each defensible from the record.
+ */
+export function evidenceLevelColor(level: string): string {
+  const map: Record<string, string> = {
+    measured:   "bg-emerald-100 text-emerald-800",
+    action:     "bg-blue-100 text-blue-800",
+    discussion: "bg-slate-100 text-slate-600",
+  };
+  return map[level] ?? "bg-slate-100 text-slate-600";
 }
 
 export function cn(...classes: (string | false | undefined | null)[]): string {

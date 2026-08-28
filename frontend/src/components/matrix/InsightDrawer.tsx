@@ -2,7 +2,7 @@
 import { useEffect, useState } from "react";
 import type { InsightCell, InsightDetail } from "@/types";
 import { fetchInsightDetail } from "@/lib/api";
-import { actionTypeColor, cn } from "@/lib/utils";
+import { actionTypeColor, cn, evidenceLevelColor, fmtDate } from "@/lib/utils";
 import Spinner from "@/components/ui/Spinner";
 import EvidencePanel from "@/components/insights/EvidencePanel";
 
@@ -46,17 +46,32 @@ export default function InsightDrawer({ cell, onClose }: InsightDrawerProps) {
         {/* Header */}
         <div className="flex items-start justify-between border-b border-slate-200 px-6 py-4">
           <div className="pr-8">
-            <div className="mb-1 flex items-center gap-2">
+            <div className="mb-1 flex flex-wrap items-center gap-2">
               <span className={cn(
                 "rounded-full px-2.5 py-0.5 text-xs font-semibold uppercase tracking-wide",
                 actionTypeColor(cell.action_type)
               )}>
                 {cell.action_type}
               </span>
+              {/* Replaces the "N% confidence" badge. That number measured how
+                  completely the extractor filled a form, not whether the claim
+                  held, and read as certainty. */}
+              <span className={cn(
+                "rounded-full px-2.5 py-0.5 text-xs font-semibold",
+                evidenceLevelColor(cell.evidence_level)
+              )}>
+                {cell.evidence_label}
+              </span>
               <span className="text-xs text-slate-400">{cell.theme_label}</span>
             </div>
             <h2 className="text-lg font-semibold leading-snug text-slate-900">{cell.label}</h2>
-            <p className="mt-0.5 text-sm text-slate-500">{cell.school_name}</p>
+            <p className="mt-0.5 text-sm text-slate-500">
+              {cell.school_name}
+              {cell.last_meeting_date && (
+                <> · {cell.meeting_count > 1 ? `${cell.meeting_count} meetings to ` : ""}
+                {fmtDate(cell.last_meeting_date)}</>
+              )}
+            </p>
             <p className="mt-2 text-[11px] text-slate-400">
               Use <kbd className="rounded bg-slate-100 px-1 py-0.5 font-mono">←</kbd>{" "}
               <kbd className="rounded bg-slate-100 px-1 py-0.5 font-mono">→</kbd> to step,{" "}
