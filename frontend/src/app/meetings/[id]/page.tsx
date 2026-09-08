@@ -1,5 +1,6 @@
 import { fetchMeeting } from "@/lib/api";
 import { cn, fmtCurrency, fmtDate, fmtDuration } from "@/lib/utils";
+import { FEATURES } from "@/lib/features";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
@@ -60,9 +61,13 @@ export default async function MeetingDetailPage({ params }: { params: { id: stri
         </div>
       </div>
 
-      {/* Votes */}
+      {/* Votes. "See all" points at the /votes index — dropped while that
+          section is switched off, rather than left as a link that 404s. */}
       {votes.length > 0 && (
-        <Section title={`Votes (${votes.length})`} link={{ href: `/votes?meeting_id=${m.meeting_id}`, label: "See all" }}>
+        <Section
+          title={`Votes (${votes.length})`}
+          link={FEATURES.votes ? { href: `/votes?meeting_id=${m.meeting_id}`, label: "See all" } : undefined}
+        >
           <div className="card divide-y divide-slate-100">
             {votes.map((v) => (
               <div key={v.vote_id} className="flex items-start gap-3 px-5 py-3">
@@ -89,7 +94,10 @@ export default async function MeetingDetailPage({ params }: { params: { id: stri
 
       {/* Financials */}
       {financials.length > 0 && (
-        <Section title={`Financials (${financials.length})`} link={{ href: `/financials?meeting_id=${m.meeting_id}`, label: "See all" }}>
+        <Section
+          title={`Financials (${financials.length})`}
+          link={FEATURES.financials ? { href: `/financials?meeting_id=${m.meeting_id}`, label: "See all" } : undefined}
+        >
           <div className="card divide-y divide-slate-100">
             {financials.map((f) => (
               <div key={f.item_id} className="flex items-center justify-between px-5 py-3">
