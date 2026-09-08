@@ -2,15 +2,18 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
+import { FEATURES, type FeatureKey } from "@/lib/features";
 
 // Ask Neo is the protagonist — it owns / and sits first in the nav.
 // No Dashboard: the home page already surfaces the briefing strip.
-const NAV = [
+// `feature` ties an entry to a switch in lib/features.ts; when that switch is
+// off the label still renders, greyed out and inert.
+const NAV: { href: string; label: string; feature?: FeatureKey }[] = [
   { href: "/",           label: "Ask Neo" },
   { href: "/insights",   label: "Insights" },
   { href: "/meetings",   label: "Meetings" },
-  { href: "/votes",      label: "Votes" },
-  { href: "/financials", label: "Financials" },
+  { href: "/votes",      label: "Votes",      feature: "votes" },
+  { href: "/financials", label: "Financials", feature: "financials" },
 ];
 
 export default function Navbar() {
@@ -27,8 +30,22 @@ export default function Navbar() {
 
         {/* Nav links */}
         <nav className="flex items-center gap-1">
-          {NAV.map(({ href, label }) => {
+          {NAV.map(({ href, label, feature }) => {
             const active = href === "/" ? path === "/" : path.startsWith(href);
+
+            if (feature && !FEATURES[feature]) {
+              return (
+                <span
+                  key={href}
+                  aria-disabled="true"
+                  title="Coming soon"
+                  className="cursor-not-allowed rounded-md px-3 py-1.5 text-sm font-medium text-slate-300 select-none"
+                >
+                  {label}
+                </span>
+              );
+            }
+
             return (
               <Link
                 key={href}
